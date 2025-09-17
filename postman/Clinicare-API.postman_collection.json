@@ -1,0 +1,112 @@
+{
+  "info": {
+    "name": "Clinicare API (Local)",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "c4f1a3d7-8b8a-4c8b-9f0a-abc123def456"
+  },
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/api/health", "host": ["{{baseUrl}}"], "path": ["api","health"] }
+      }
+    },
+    {
+      "name": "Ping",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/api/ping", "host": ["{{baseUrl}}"], "path": ["api","ping"] }
+      }
+    },
+    {
+      "name": "Users - List",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": { "raw": "{{baseUrl}}/api/users", "host": ["{{baseUrl}}"], "path": ["api","users"] }
+      }
+    },
+    {
+      "name": "Register - Patient",
+      "request": {
+        "method": "POST",
+        "header": [ {"key":"Content-Type","value":"application/json"} ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Alice Patient\",\n  \"email\": \"alice.patient@example.com\",\n  \"password\": \"Secret123!\",\n  \"role\": \"patient\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/register", "host": ["{{baseUrl}}"], "path": ["api","register"] }
+      }
+    },
+    {
+      "name": "Admin - Create Doctor",
+      "request": {
+        "method": "POST",
+        "header": [
+          {"key":"Content-Type","value":"application/json"},
+          {"key":"x-admin-secret","value":"{{adminSecret}}"}
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Dr. Jane\",\n  \"email\": \"dr.jane@example.com\",\n  \"password\": \"Secret123!\",\n  \"role\": \"doctor\"\n}"
+        },
+        "url": { "raw": "{{baseUrl}}/api/admin/users", "host": ["{{baseUrl}}"], "path": ["api","admin","users"] }
+      }
+    },
+
+    { "name": "Patients - Create", "request": {
+      "method": "POST",
+      "header": [ {"key":"Content-Type","value":"application/json"} ],
+      "body": {"mode":"raw","raw":"{\n  \"name\": \"John Doe\",\n  \"email\": \"john@example.com\",\n  \"phone\": \"+255700000000\",\n  \"notes\": \"Allergic to penicillin\"\n}"},
+      "url": {"raw":"{{baseUrl}}/api/patients","host":["{{baseUrl}}"],"path":["api","patients"]}
+    }},
+    { "name": "Patients - List", "request": {
+      "method": "GET",
+      "header": [],
+      "url": {"raw":"{{baseUrl}}/api/patients","host":["{{baseUrl}}"],"path":["api","patients"]}
+    }},
+
+    { "name": "Appointments - Create", "request": {
+      "method": "POST",
+      "header": [ {"key":"Content-Type","value":"application/json"} ],
+      "body": {"mode":"raw","raw":"{\n  \"patient_id\": 1,\n  \"date\": \"2025-09-20\",\n  \"time\": \"10:30\",\n  \"notes\": \"Initial consultation\"\n}"},
+      "url": {"raw":"{{baseUrl}}/api/appointments","host":["{{baseUrl}}"],"path":["api","appointments"]}
+    }},
+    { "name": "Appointments - List", "request": {
+      "method": "GET",
+      "header": [],
+      "url": {"raw":"{{baseUrl}}/api/appointments?patient_id=1&from=2025-09-01&to=2025-09-30","host":["{{baseUrl}}"],"path":["api","appointments"],"query":[{"key":"patient_id","value":"1"},{"key":"from","value":"2025-09-01"},{"key":"to","value":"2025-09-30"}]}
+    }},
+
+    { "name": "Records - Create", "request": {
+      "method": "POST",
+      "header": [ {"key":"Content-Type","value":"application/json"} ],
+      "body": {"mode":"raw","raw":"{\n  \"patient_id\": 1,\n  \"record_type\": \"Diagnosis\",\n  \"notes\": \"Hypertension Stage 1\",\n  \"date\": \"2025-09-20\"\n}"},
+      "url": {"raw":"{{baseUrl}}/api/records","host":["{{baseUrl}}"],"path":["api","records"]}
+    }},
+    { "name": "Records - List", "request": {
+      "method": "GET",
+      "header": [],
+      "url": {"raw":"{{baseUrl}}/api/records?patient_id=1","host":["{{baseUrl}}"],"path":["api","records"],"query":[{"key":"patient_id","value":"1"}]}
+    }},
+
+    { "name": "Invoices - Create", "request": {
+      "method": "POST",
+      "header": [ {"key":"Content-Type","value":"application/json"} ],
+      "body": {"mode":"raw","raw":"{\n  \"patient_id\": 1,\n  \"amount\": 120.50,\n  \"date\": \"2025-09-20\",\n  \"status\": \"pending\"\n}"},
+      "url": {"raw":"{{baseUrl}}/api/invoices","host":["{{baseUrl}}"],"path":["api","invoices"]}
+    }},
+    { "name": "Invoices - List", "request": {
+      "method": "GET",
+      "header": [],
+      "url": {"raw":"{{baseUrl}}/api/invoices?patient_id=1","host":["{{baseUrl}}"],"path":["api","invoices"],"query":[{"key":"patient_id","value":"1"}]}
+    }}
+  ],
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:5000" },
+    { "key": "adminSecret", "value": "ChangeThisToAStrongSecret" }
+  ]
+}

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { Users, Calendar, DollarSign, TrendingUp, Activity, AlertTriangle, BarChart3, Settings } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -5,6 +6,35 @@ import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
 
 const AdminDashboard = () => {
+  const [users, setUsers] = useState<Array<{id:number; name:string; email:string; role:string;}>>([]);
+  const [usersErr, setUsersErr] = useState<string | null>(null);
+  const [usersLoading, setUsersLoading] = useState(true);
+
+  const parseResponse = async (res: Response) => {
+    const ct = res.headers.get("content-type") || "";
+    let data: any = null;
+    if (ct.includes("application/json")) data = await res.json();
+    else { const text = await res.text(); try { data = JSON.parse(text); } catch { throw new Error(text || "Non-JSON response"); } }
+    if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
+    return data;
+  };
+
+  useEffect(() => {
+    (async () => {
+      setUsersLoading(true);
+      setUsersErr(null);
+      try {
+        const res = await fetch('/api/users');
+        const data = await parseResponse(res);
+        setUsers(Array.isArray(data) ? data : []);
+      } catch (e:any) {
+        setUsersErr(e?.message || 'Failed to load users');
+      } finally {
+        setUsersLoading(false);
+      }
+    })();
+  }, []);
+
   return (
     <div className="space-y-6">
       {/* Welcome section */}
@@ -32,6 +62,24 @@ const AdminDashboard = () => {
                 <p className="text-sm text-muted-foreground">Total Patients</p>
                 <p className="text-xs text-green-600">+12% this month</p>
               </div>
+            </div>
+            <div className="mt-6">
+              <p className="text-sm font-medium">Recent Users</p>
+              {usersLoading && <p className="text-xs text-muted-foreground mt-1">Loading…</p>}
+              {usersErr && <p className="text-xs text-rose-700 mt-1">{usersErr}</p>}
+              {!usersLoading && !usersErr && (
+                <ul className="mt-2 space-y-2 text-sm">
+                  {users.slice(0,5).map(u => (
+                    <li key={u.id} className="flex items-center justify-between border rounded px-2 py-1">
+                      <span className="truncate mr-2">{u.name} <span className="text-muted-foreground">({u.email})</span></span>
+                      <Badge className="capitalize">{u.role}</Badge>
+                    </li>
+                  ))}
+                  {users.length === 0 && (
+                    <li className="text-muted-foreground">No users found.</li>
+                  )}
+                </ul>
+              )}
             </div>
           </CardContent>
         </Card>

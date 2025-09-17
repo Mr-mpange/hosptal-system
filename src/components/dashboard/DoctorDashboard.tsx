@@ -1,17 +1,64 @@
+import { useEffect, useState } from "react";
 import { Users, Calendar, Clock, FileText, AlertCircle, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
+type DocAppt = { id:number; doctor_id?:number; patient_id:number; date:string; time:string; notes?:string };
+
 const DoctorDashboard = () => {
+  let displayName = "Doctor";
+  let userId: number | undefined = undefined;
+  try {
+    const raw = typeof window !== 'undefined' ? localStorage.getItem('auth_user') : null;
+    if (raw) {
+      const u = JSON.parse(raw);
+      if (u?.name) displayName = u.name;
+      if (u?.id) userId = Number(u.id);
+    }
+  } catch {}
+  const [schedule, setSchedule] = useState<DocAppt[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const parseResponse = async (res: Response) => {
+    const ct = res.headers.get("content-type") || "";
+    let data: any = null;
+    if (ct.includes("application/json")) data = await res.json();
+    else { const text = await res.text(); try { data = JSON.parse(text); } catch { throw new Error(text || "Non-JSON response"); } }
+    if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
+    return data;
+  };
+
+  useEffect(() => {
+    let active = true;
+    (async () => {
+      if (!userId) { setLoading(false); return; }
+      setLoading(true); setError(null);
+      try {
+        const res = await fetch(`/api/appointments?doctor_id=${userId}`);
+        const data = await parseResponse(res);
+        if (!active) return;
+        setSchedule(Array.isArray(data) ? data.slice(0, 10) : []);
+      } catch (e:any) {
+        if (!active) return;
+        setError(e?.message || 'Failed to load schedule');
+      } finally {
+        if (active) setLoading(false);
+      }
+    })();
+    return () => { active = false; };
+  // userId only
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
   return (
     <div className="space-y-6">
       {/* Welcome section */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Good morning, Dr. Wilson</h1>
-          <p className="text-muted-foreground">You have 8 appointments scheduled for today</p>
+          <h1 className="text-3xl font-bold text-foreground">Good morning, {displayName}</h1>
+          <p className="text-muted-foreground">You have {schedule.length} appointments scheduled</p>
         </div>
         <Button className="bg-gradient-to-r from-primary to-primary/90">
           <Users className="w-4 h-4 mr-2" />
@@ -28,8 +75,8 @@ const DoctorDashboard = () => {
                 <Calendar className="w-6 h-6 text-primary" />
               </div>
               <div>
-                <p className="text-2xl font-bold">8</p>
-                <p className="text-sm text-muted-foreground">Today's Appointments</p>
+                <p className="text-2xl font-bold">{schedule.length}</p>
+                <p className="text-sm text-muted-foreground">Appointments</p>
               </div>
             </div>
           </CardContent>
@@ -79,50 +126,41 @@ const DoctorDashboard = () => {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Today's Schedule */}
+        {/* Schedule */}
         <Card>
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Clock className="w-5 h-5" />
-              Today's Schedule
+              Your Schedule
             </CardTitle>
-            <CardDescription>Your appointments for today</CardDescription>
+            <CardDescription>Your upcoming appointments</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            {[
-              { patient: "John Doe", time: "9:00 AM", type: "Check-up", status: "completed", avatar: "JD" },
-              { patient: "Sarah Miller", time: "10:30 AM", type: "Follow-up", status: "in-progress", avatar: "SM" },
-              { patient: "Mike Johnson", time: "2:00 PM", type: "Consultation", status: "upcoming", avatar: "MJ" },
-              { patient: "Emily Davis", time: "3:30 PM", type: "Emergency", status: "urgent", avatar: "ED" },
-            ].map((appointment, index) => (
-              <div key={index} className="flex items-center justify-between p-4 bg-accent/50 rounded-lg">
+            {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
+            {error && <div className="text-sm text-rose-700">{error}</div>}
+            {!loading && !error && schedule.map((a) => (
+              <div key={a.id} className="flex items-center justify-between p-4 bg-accent/50 rounded-lg">
                 <div className="flex items-center space-x-3">
                   <Avatar className="w-10 h-10">
                     <AvatarImage src="" />
                     <AvatarFallback className="bg-primary text-primary-foreground text-sm">
-                      {appointment.avatar}
+                      PT
                     </AvatarFallback>
                   </Avatar>
                   <div>
-                    <p className="font-medium">{appointment.patient}</p>
-                    <p className="text-sm text-muted-foreground">{appointment.type}</p>
+                    <p className="font-medium">Patient #{a.patient_id}</p>
+                    <p className="text-sm text-muted-foreground">Notes: {a.notes || '—'}</p>
                   </div>
                 </div>
                 <div className="text-right">
-                  <p className="font-medium">{appointment.time}</p>
-                  <Badge 
-                    variant={
-                      appointment.status === "completed" ? "default" :
-                      appointment.status === "in-progress" ? "secondary" :
-                      appointment.status === "urgent" ? "destructive" : "outline"
-                    }
-                    className="mt-1"
-                  >
-                    {appointment.status}
-                  </Badge>
+                  <p className="font-medium">{a.time}</p>
+                  <Badge className="mt-1">scheduled</Badge>
                 </div>
               </div>
             ))}
+            {!loading && !error && schedule.length === 0 && (
+              <div className="text-sm text-muted-foreground">No appointments found.</div>
+            )}
           </CardContent>
         </Card>
 

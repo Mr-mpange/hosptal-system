@@ -23,38 +23,32 @@ interface DashboardLayoutProps {
   userName: string;
   userEmail: string;
   children: React.ReactNode;
+  onLogout?: () => void;
 }
 
-const DashboardLayout = ({ userRole, userName, userEmail, children }: DashboardLayoutProps) => {
+const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: DashboardLayoutProps) => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const navigate = useNavigate();
 
   const getMenuItems = () => {
-    const baseItems = [
-      { icon: Heart, label: "Dashboard", path: "/dashboard" },
+    // Role-specific dashboard path
+    const dashboardPath = userRole === 'patient'
+      ? '/dashboard/patient'
+      : userRole === 'doctor'
+      ? '/dashboard/doctor'
+      : '/dashboard/admin';
+
+    // Show all key pages for all roles so navigation is consistent
+    const items = [
+      { icon: Heart, label: "Dashboard", path: dashboardPath },
+      { icon: Calendar, label: "Appointments", path: "/appointments" },
+      { icon: Users, label: "Patients", path: "/patients" },
+      { icon: FileText, label: "Medical Records", path: "/records" },
+      { icon: CreditCard, label: "Billing", path: "/billing" },
+      { icon: Users, label: "Users", path: "/users" },
+      { icon: Settings, label: "Settings", path: "/settings" },
     ];
-
-    const roleSpecificItems = {
-      patient: [
-        { icon: Calendar, label: "My Appointments", path: "/appointments" },
-        { icon: FileText, label: "Medical Records", path: "/records" },
-        { icon: CreditCard, label: "Billing", path: "/billing" },
-      ],
-      doctor: [
-        { icon: Users, label: "Patients", path: "/patients" },
-        { icon: Calendar, label: "Appointments", path: "/appointments" },
-        { icon: FileText, label: "Medical Records", path: "/records" },
-      ],
-      admin: [
-        { icon: Users, label: "Users", path: "/users" },
-        { icon: Calendar, label: "Appointments", path: "/appointments" },
-        { icon: FileText, label: "Records", path: "/records" },
-        { icon: CreditCard, label: "Billing", path: "/billing" },
-        { icon: Settings, label: "Settings", path: "/settings" },
-      ],
-    };
-
-    return [...baseItems, ...roleSpecificItems[userRole]];
+    return items;
   };
 
   const menuItems = getMenuItems();
@@ -124,6 +118,7 @@ const DashboardLayout = ({ userRole, userName, userEmail, children }: DashboardL
               variant="ghost"
               size="sm"
               className="w-full mt-2 justify-start gap-2 text-muted-foreground"
+              onClick={() => onLogout?.()}
             >
               <LogOut className="w-4 h-4" />
               Logout

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { Eye, EyeOff, Heart } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,7 +10,13 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 
 interface LoginFormProps {
-  onLogin: (email: string, password: string, role: "patient" | "doctor" | "admin") => void;
+  onLogin: (
+    email: string,
+    password: string,
+    role: "patient" | "doctor" | "admin",
+    nameFromServer?: string,
+    idFromServer?: number
+  ) => void;
 }
 
 const LoginForm = ({ onLogin }: LoginFormProps) => {
@@ -22,33 +29,32 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    
     if (!email || !password) {
-      toast({
-        title: "Error",
-        description: "Please fill in all fields",
-        variant: "destructive",
-      });
+      toast({ title: "Error", description: "Please fill in all fields", variant: "destructive" });
       return;
     }
-
     setIsLoading(true);
-    
     try {
-      // Simulate authentication
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      onLogin(email, password, role);
-      
-      toast({
-        title: "Welcome!",
-        description: `Successfully logged in as ${role}`,
+      const res = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
       });
-    } catch (error) {
-      toast({
-        title: "Login Failed",
-        description: "Invalid credentials. Please try again.",
-        variant: "destructive",
-      });
+      const ct = res.headers.get("content-type") || "";
+      let data: any = null;
+      if (ct.includes("application/json")) data = await res.json();
+      else {
+        const text = await res.text();
+        try { data = JSON.parse(text); } catch { throw new Error(text || "Non-JSON response"); }
+      }
+      if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
+      // Normalize role from server so dashboard is chosen correctly regardless of case
+      const rawRole = String(data?.role ?? "patient").toLowerCase();
+      const serverRole = (rawRole === "patient" || rawRole === "doctor" || rawRole === "admin") ? rawRole : "patient";
+      onLogin(email, password, serverRole, data?.name || email, data?.id);
+      toast({ title: "Welcome!", description: `Successfully logged in as ${serverRole}` });
+    } catch (err: any) {
+      toast({ title: "Login Failed", description: err?.message ?? "Invalid credentials", variant: "destructive" });
     } finally {
       setIsLoading(false);
     }
@@ -97,6 +103,9 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
                     <Label htmlFor="admin" className="text-sm">Admin</Label>
                   </div>
                 </RadioGroup>
+                <p className="text-xs text-muted-foreground">
+                  Redirect after login: <span className="font-medium">/dashboard/{role}</span>. Note: your actual dashboard is determined by your account role in the system.
+                </p>
               </div>
 
               {/* Email */}
@@ -140,10 +149,10 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
                 </div>
               </div>
 
-              {/* Demo credentials info */}
+              {/* Info */}
               <Alert>
                 <AlertDescription className="text-xs">
-                  <strong>Demo:</strong> Use any email/password to login. Role selection determines dashboard view.
+                  Enter your account credentials. Your dashboard is determined by your account role on the server (patient/doctor/admin).
                 </AlertDescription>
               </Alert>
 
@@ -161,6 +170,11 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
                 <Button variant="link" className="text-sm text-muted-foreground">
                   Forgot your password?
                 </Button>
+                <div className="mt-1">
+                  <Link to="/register" className="text-sm text-muted-foreground hover:underline">
+                    Don’t have an account? Create one
+                  </Link>
+                </div>
               </div>
             </form>
           </CardContent>
