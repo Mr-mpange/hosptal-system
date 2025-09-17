@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Welcome to your Lovable project
 
 ## Project info
@@ -177,3 +178,7 @@ Testing registration:
 
 - From the UI: navigate to `/register` and create an account.
 - From API: `curl -X POST http://localhost:5000/api/register -H "Content-Type: application/json" -d '{"name":"John","email":"john@example.com","password":"secret","role":"patient"}'`
+=======
+# hosptal-system 
+hry
+>>>>>>> 8a1b68558e2127b60d8925e6220e8f5195ba1d30
