@@ -40,7 +40,10 @@ const Billing = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/invoices");
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const res = await fetch("/api/invoices", {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       const data = await parseResponse(res);
       setRows(Array.isArray(data) ? data : []);
     } catch (err: any) {
@@ -56,9 +59,12 @@ const Billing = () => {
     if (!patientId || !amount || !date) { alert("patient_id, amount and date are required"); return; }
     setSubmitting(true);
     try {
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch("/api/invoices", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ patient_id: Number(patientId), amount: Number(amount), date, status })
       });
       await parseResponse(res);

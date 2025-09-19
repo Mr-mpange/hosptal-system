@@ -40,7 +40,10 @@ const Patients = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/patients");
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const res = await fetch("/api/patients", {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       const data = await parseResponse(res);
       setRows(Array.isArray(data) ? data : []);
     } catch (err: any) {
@@ -56,9 +59,12 @@ const Patients = () => {
     if (!name) { alert("Name is required"); return; }
     setSubmitting(true);
     try {
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch("/api/patients", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ name, email, phone, notes })
       });
       await parseResponse(res);
@@ -84,19 +90,19 @@ const Patients = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <Label htmlFor="p-name">Full Name</Label>
-              <Input id="p-name" placeholder="Full name" />
+              <Input id="p-name" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} />
             </div>
             <div>
               <Label htmlFor="p-email">Email</Label>
-              <Input id="p-email" type="email" placeholder="patient@example.com" />
+              <Input id="p-email" type="email" placeholder="patient@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
             </div>
             <div>
               <Label htmlFor="p-phone">Phone</Label>
-              <Input id="p-phone" placeholder="(+255) 700 000 000" />
+              <Input id="p-phone" placeholder="(+255) 700 000 000" value={phone} onChange={(e) => setPhone(e.target.value)} />
             </div>
             <div className="md:col-span-2 lg:col-span-3">
               <Label htmlFor="p-notes">Notes</Label>
-              <Input id="p-notes" placeholder="Optional notes" />
+              <Input id="p-notes" placeholder="Optional notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
             </div>
           </div>
           <div className="mt-4">

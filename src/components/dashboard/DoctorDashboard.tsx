@@ -37,7 +37,9 @@ const DoctorDashboard = () => {
       if (!userId) { setLoading(false); return; }
       setLoading(true); setError(null);
       try {
-        const res = await fetch(`/api/appointments?doctor_id=${userId}`);
+        const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
+        const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+        const res = await fetch(`/api/appointments?doctor_id=${userId}`, { headers });
         const data = await parseResponse(res);
         if (!active) return;
         setSchedule(Array.isArray(data) ? data.slice(0, 10) : []);

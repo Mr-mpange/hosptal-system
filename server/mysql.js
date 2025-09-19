@@ -1,6 +1,11 @@
 // ESM MySQL connection pool using mysql2/promise
-// Reads env from .env via dotenv/config side-effect import
-import 'dotenv/config';
+// Explicitly load env from the project root regardless of CWD
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+dotenv.config({ path: path.resolve(__dirname, '../.env') });
 import mysql from 'mysql2/promise';
 
 const passwordRaw = process.env.DB_PASSWORD;

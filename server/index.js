@@ -1,16 +1,63 @@
 // ESM Express server with MySQL connection pooling and basic routes.
-// Uses dotenv/config for env loading.
-import 'dotenv/config';
+// Explicitly load the root .env regardless of where the process is started from.
+import path from 'path';
+import { fileURLToPath } from 'url';
+import dotenv from 'dotenv';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const envPath = path.resolve(__dirname, '../.env');
+dotenv.config({ path: envPath });
 import express from 'express';
 import cors from 'cors';
 import { pool } from './mysql.js';
 import { sequelize, initModels, syncSequelize, models } from './sequelize.js';
+import jwt from 'jsonwebtoken';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
 app.use(express.json());
+
+// ==== JWT helpers and middleware (must be defined before any route uses them) ====
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d';
+
+const signToken = (user) => {
+  if (!JWT_SECRET) throw new Error('Server is missing JWT_SECRET');
+  const payload = {
+    sub: String(user.id),
+    role: user.role,
+    email: user.email,
+    name: user.name,
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+};
+
+const requireAuth = (req, res, next) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const parts = auth.split(' ');
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      return res.status(401).json({ message: 'Missing or invalid Authorization header' });
+    }
+    if (!JWT_SECRET) {
+      return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
+    }
+    const decoded = jwt.verify(parts[1], JWT_SECRET);
+    req.user = decoded; // { sub, role, email, name, iat, exp }
+    next();
+  } catch (err) {
+    console.error('Auth error:', err?.message || err);
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+};
+
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+  if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'Forbidden' });
+  next();
+};
 
 // Tiny logger for debugging
 app.use((req, _res, next) => {
@@ -36,7 +83,11 @@ app.post('/api/login', async (req, res) => {
     const bcrypt = (await import('bcryptjs')).default;
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
-    return res.json({ id: user.id, name: user.name, email: user.email, role: user.role });
+    const token = signToken(user);
+    return res.json({
+      token,
+      user: { id: user.id, name: user.name, email: user.email, role: user.role },
+    });
   } catch (err) {
     console.error('/api/login error:', err);
     return res.status(500).json({ message: 'Login failed', details: toDbMessage(err) });
@@ -44,10 +95,16 @@ app.post('/api/login', async (req, res) => {
 });
 
 // Patients: fetch by user_id to support personalized dashboards
-app.get('/api/patients/by-user/:userId', async (req, res) => {
+app.get('/api/patients/by-user/:userId', requireAuth, async (req, res) => {
   try {
     const userId = Number(req.params.userId);
     if (!userId) return res.status(400).json({ message: 'Invalid user id' });
+    // Patients can only access their own record; doctors/admins can access any
+    const role = req.user?.role;
+    const sub = Number(req.user?.sub);
+    if (role === 'patient' && sub !== userId) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
     const [rows] = await pool.query('SELECT * FROM patients WHERE user_id = ? LIMIT 1', [userId]);
     if (!rows || rows.length === 0) return res.status(404).json({ message: 'Patient not found for user' });
     res.json(rows[0]);
@@ -72,18 +129,7 @@ const toDbMessage = (err) => {
   return err.message || String(err);
 };
 
-// Simple admin auth using a shared secret. In production, use proper auth (JWT/OAuth).
-const requireAdmin = (req, res, next) => {
-  const headerSecret = req.headers['x-admin-secret'] || req.headers['x-admin-token'];
-  const secret = process.env.ADMIN_API_SECRET;
-  if (!secret) {
-    return res.status(500).json({ message: 'Server is missing ADMIN_API_SECRET' });
-  }
-  if (!headerSecret || headerSecret !== secret) {
-    return res.status(401).json({ message: 'Unauthorized' });
-  }
-  next();
-};
+ 
 
 // Health check (always 200, with db status included)
 app.get('/api/health', async (_req, res) => {
@@ -100,8 +146,8 @@ app.get('/api/health', async (_req, res) => {
   res.json({ status: 'ok', db, db_error });
 });
 
-// Admin: create user with role (protected by ADMIN_API_SECRET)
-app.post('/api/admin/users', requireAdmin, async (req, res) => {
+// Admin: create user with role (protected by JWT + role=admin)
+app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res) => {
   try {
     const { name, email, password, role } = req.body || {};
     if (!name || !email || !password || !role) {
@@ -137,11 +183,12 @@ app.get('/api/ping', (_req, res) => {
 // Registration endpoint
 app.post('/api/register', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body || {};
+    const { name, email, password } = req.body || {};
     if (!name || !email || !password) {
       return res.status(400).json({ message: 'Missing required fields' });
     }
-    const userRole = ['patient', 'doctor', 'admin'].includes(role) ? role : 'patient';
+    // Enforce patient self-registration
+    const userRole = 'patient';
     const [existing] = await pool.query('SELECT id FROM users WHERE email = ? LIMIT 1', [email]);
     if (existing && existing.length > 0) {
       return res.status(409).json({ message: 'Email is already registered' });
@@ -164,15 +211,23 @@ app.post('/api/register', async (req, res) => {
         console.warn('Auto-create patient failed:', e?.message || e);
       }
     }
-    return res.status(201).json({ id: result.insertId, name, email, role: userRole });
+    const newUser = { id: result.insertId, name, email, role: userRole };
+    const token = signToken(newUser);
+    return res.status(201).json({ token, user: newUser });
   } catch (err) {
     console.error('/api/register error:', err);
     return res.status(500).json({ message: 'Registration failed', details: toDbMessage(err) });
   }
 });
 
+// Current user info
+app.get('/api/me', requireAuth, (req, res) => {
+  const { sub, role, email, name, iat, exp } = req.user || {};
+  res.json({ id: Number(sub), role, email, name, iat, exp });
+});
+
 // Users list (for UI table)
-app.get('/api/users', async (_req, res) => {
+app.get('/api/users', requireAuth, requireRole('admin'), async (_req, res) => {
   try {
     const [rows] = await pool.query('SELECT id, name, email, role, created_at FROM users ORDER BY id DESC LIMIT 50');
     res.json(rows);
@@ -183,7 +238,7 @@ app.get('/api/users', async (_req, res) => {
 });
 
 // ===== Patients =====
-app.post('/api/patients', async (req, res) => {
+app.post('/api/patients', requireAuth, requireRole('doctor', 'admin'), async (req, res) => {
   try {
     const { name, email, phone, notes } = req.body || {};
     if (!name) return res.status(400).json({ message: 'Missing required field: name' });
@@ -195,7 +250,7 @@ app.post('/api/patients', async (req, res) => {
   }
 });
 
-app.get('/api/patients', async (_req, res) => {
+app.get('/api/patients', requireAuth, requireRole('doctor', 'admin'), async (_req, res) => {
   try {
     const list = await models.Patient.findAll({ order: [['id', 'DESC']], limit: 100 });
     res.json(list);
@@ -206,11 +261,19 @@ app.get('/api/patients', async (_req, res) => {
 });
 
 // ===== Appointments =====
-app.post('/api/appointments', async (req, res) => {
+app.post('/api/appointments', requireAuth, async (req, res) => {
   try {
     const { patient_id, date, time, notes } = req.body || {};
     if (!patient_id || !date || !time) {
       return res.status(400).json({ message: 'Missing required fields: patient_id, date, time' });
+    }
+    // Patients can only create for their own patient_id
+    if (req.user?.role === 'patient') {
+      const [rows] = await pool.query('SELECT user_id FROM patients WHERE id = ? LIMIT 1', [patient_id]);
+      const owner = rows && rows[0]?.user_id ? Number(rows[0].user_id) : undefined;
+      if (!owner || owner !== Number(req.user.sub)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
     }
     const row = await models.Appointment.create({ patient_id, date, time, notes });
     res.status(201).json(row);
@@ -220,12 +283,20 @@ app.post('/api/appointments', async (req, res) => {
   }
 });
 
-app.get('/api/appointments', async (req, res) => {
+app.get('/api/appointments', requireAuth, async (req, res) => {
   try {
     const { patient_id, doctor_id } = req.query;
     const where = {};
-    if (patient_id) where.patient_id = patient_id;
-    if (doctor_id) where.doctor_id = doctor_id;
+    if (req.user?.role === 'patient') {
+      // Force filter to own patient_id
+      const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+      const pid = rows && rows[0]?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else {
+      if (patient_id) where.patient_id = patient_id;
+      if (doctor_id) where.doctor_id = doctor_id;
+    }
     const list = await models.Appointment.findAll({ where, order: [['id', 'DESC']], limit: 200 });
     res.json(list);
   } catch (err) {
@@ -235,11 +306,19 @@ app.get('/api/appointments', async (req, res) => {
 });
 
 // ===== Medical Records =====
-app.post('/api/records', async (req, res) => {
+app.post('/api/records', requireAuth, async (req, res) => {
   try {
     const { patient_id, record_type, notes, date } = req.body || {};
     if (!patient_id || !record_type || !date) {
       return res.status(400).json({ message: 'Missing required fields: patient_id, record_type, date' });
+    }
+    // Patients can only create records for themselves; doctors/admin allowed
+    if (req.user?.role === 'patient') {
+      const [rows] = await pool.query('SELECT user_id FROM patients WHERE id = ? LIMIT 1', [patient_id]);
+      const owner = rows && rows[0]?.user_id ? Number(rows[0].user_id) : undefined;
+      if (!owner || owner !== Number(req.user.sub)) {
+        return res.status(403).json({ message: 'Forbidden' });
+      }
     }
     const row = await models.MedicalRecord.create({ patient_id, record_type, notes, date });
     res.status(201).json(row);
@@ -249,11 +328,18 @@ app.post('/api/records', async (req, res) => {
   }
 });
 
-app.get('/api/records', async (req, res) => {
+app.get('/api/records', requireAuth, async (req, res) => {
   try {
     const { patient_id } = req.query;
     const where = {};
-    if (patient_id) where.patient_id = patient_id;
+    if (req.user?.role === 'patient') {
+      const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+      const pid = rows && rows[0]?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else {
+      if (patient_id) where.patient_id = patient_id;
+    }
     const list = await models.MedicalRecord.findAll({ where, order: [['id', 'DESC']], limit: 200 });
     res.json(list);
   } catch (err) {
@@ -263,7 +349,7 @@ app.get('/api/records', async (req, res) => {
 });
 
 // ===== Invoices =====
-app.post('/api/invoices', async (req, res) => {
+app.post('/api/invoices', requireAuth, requireRole('doctor', 'admin'), async (req, res) => {
   try {
     const { patient_id, amount, date, status } = req.body || {};
     if (!patient_id || !amount || !date) {
@@ -277,11 +363,18 @@ app.post('/api/invoices', async (req, res) => {
   }
 });
 
-app.get('/api/invoices', async (req, res) => {
+app.get('/api/invoices', requireAuth, async (req, res) => {
   try {
     const { patient_id } = req.query;
     const where = {};
-    if (patient_id) where.patient_id = patient_id;
+    if (req.user?.role === 'patient') {
+      const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+      const pid = rows && rows[0]?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else {
+      if (patient_id) where.patient_id = patient_id;
+    }
     const list = await models.Invoice.findAll({ where, order: [['id', 'DESC']], limit: 200 });
     res.json(list);
   } catch (err) {
@@ -306,6 +399,8 @@ app.use((err, _req, res, _next) => {
 // Start server after DB init/sync
 (async () => {
   try {
+    // Startup diagnostics for env loading (do not print secret)
+    console.log(`[env] Loaded from ${envPath} (JWT_SECRET set: ${Boolean(process.env.JWT_SECRET)})`);
     await initModels();
     await syncSequelize();
     app.listen(PORT, () => {

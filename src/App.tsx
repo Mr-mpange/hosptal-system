@@ -9,6 +9,13 @@ import Register from "./pages/Register";
 import PatientDashboard from "@/components/dashboard/PatientDashboard";
 import DoctorDashboard from "@/components/dashboard/DoctorDashboard";
 import AdminDashboard from "@/components/dashboard/AdminDashboard";
+import DashboardLayout from "@/components/layout/DashboardLayout";
+import Appointments from "./pages/Appointments";
+import Patients from "./pages/Patients";
+import MedicalRecords from "./pages/MedicalRecords";
+import Billing from "./pages/Billing";
+import UsersList from "@/components/users/UsersList";
+import { useNavigate } from "react-router-dom";
 
 const queryClient = new QueryClient();
 
@@ -53,7 +60,15 @@ const App = () => (
             path="/dashboard/patient"
             element={
               <ProtectedRoute allowed={["patient"]}>
-                <PatientDashboard />
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <PatientDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
               </ProtectedRoute>
             }
           />
@@ -61,7 +76,15 @@ const App = () => (
             path="/dashboard/doctor"
             element={
               <ProtectedRoute allowed={["doctor"]}>
-                <DoctorDashboard />
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "doctor"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <DoctorDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
               </ProtectedRoute>
             }
           />
@@ -69,7 +92,112 @@ const App = () => (
             path="/dashboard/admin"
             element={
               <ProtectedRoute allowed={["admin"]}>
-                <AdminDashboard />
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "admin"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <AdminDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          {/* Core pages (protected for any logged-in role) */}
+          <Route
+            path="/appointments"
+            element={
+              <ProtectedRoute>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <Appointments />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/patients"
+            element={
+              <ProtectedRoute allowed={["doctor","admin"]}>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <Patients />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/records"
+            element={
+              <ProtectedRoute>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <MedicalRecords />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/billing"
+            element={
+              <ProtectedRoute>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <Billing />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/users"
+            element={
+              <ProtectedRoute allowed={["admin"]}>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <UsersList />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <ProtectedRoute>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <div className="p-6"><h1 className="text-2xl font-bold">Settings</h1><p className="text-muted-foreground">Coming soon...</p></div>
+                    </DashboardLayout>
+                  );
+                })()}
               </ProtectedRoute>
             }
           />

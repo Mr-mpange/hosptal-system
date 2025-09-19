@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { Link, useNavigate } from "react-router-dom";
@@ -13,7 +12,6 @@ const RegisterForm = () => {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"patient" | "doctor" | "admin">("patient");
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
   const navigate = useNavigate();
@@ -29,7 +27,7 @@ const RegisterForm = () => {
       const res = await fetch("/api/register", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, email, password, role }),
+        body: JSON.stringify({ name, email, password }),
       });
       const ct = res.headers.get("content-type") || "";
       let data: any = null;
@@ -44,8 +42,21 @@ const RegisterForm = () => {
         }
       }
       if (!res.ok) throw new Error(data?.message || `HTTP ${res.status}`);
-      toast({ title: "Account created", description: "You can now sign in." });
-      navigate("/", { replace: true });
+      // Expect shape: { token, user: { id, name, email, role } }
+      const token = data?.token as string | undefined;
+      const u = data?.user || {};
+      // Persist token and auth_user
+      try {
+        if (token) localStorage.setItem("auth_token", token);
+        if (u?.email && u?.role && u?.name) {
+          localStorage.setItem("auth_user", JSON.stringify({ id: u.id, email: u.email, name: u.name, role: u.role }));
+        }
+      } catch {}
+      toast({ title: "Welcome!", description: `Account created for ${u?.email || email}` });
+      // Redirect to role-specific dashboard
+      const role = String(u?.role || 'patient').toLowerCase();
+      const path = role === 'doctor' ? '/dashboard/doctor' : role === 'admin' ? '/dashboard/admin' : '/dashboard/patient';
+      navigate(path, { replace: true });
     } catch (err: any) {
       toast({ title: "Registration failed", description: err?.message ?? "Unknown error", variant: "destructive" });
     } finally {
@@ -87,23 +98,7 @@ const RegisterForm = () => {
                 <Input id="password" type="password" placeholder="Create a password" value={password} onChange={(e) => setPassword(e.target.value)} required />
               </div>
 
-              <div className="space-y-3">
-                <Label className="text-sm font-medium">Select Role</Label>
-                <RadioGroup value={role} onValueChange={(value) => setRole(value as any)} className="flex gap-6">
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="patient" id="r-patient" />
-                    <Label htmlFor="r-patient" className="text-sm">Patient</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="doctor" id="r-doctor" />
-                    <Label htmlFor="r-doctor" className="text-sm">Doctor</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="admin" id="r-admin" />
-                    <Label htmlFor="r-admin" className="text-sm">Admin</Label>
-                  </div>
-                </RadioGroup>
-              </div>
+              {/* Role selection removed: all self-registrations are patients. */}
 
               <Alert>
                 <AlertDescription className="text-xs">

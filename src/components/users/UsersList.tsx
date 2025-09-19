@@ -25,7 +25,10 @@ const UsersList = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/users");
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const res = await fetch("/api/users", {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       const ct = res.headers.get("content-type") || "";
       let data: any = null;
       if (ct.includes("application/json")) data = await res.json();
@@ -46,17 +49,21 @@ const UsersList = () => {
     load();
   }, []);
 
-  // Admin create user (demo-only, requires ADMIN_API_SECRET header)
+  // Admin create user (requires JWT token with role=admin)
   const [aName, setAName] = useState("");
   const [aEmail, setAEmail] = useState("");
   const [aPass, setAPass] = useState("");
   const [aRole, setARole] = useState<"patient" | "doctor" | "admin">("patient");
-  const [aSecret, setASecret] = useState("");
   const [aSubmitting, setASubmitting] = useState(false);
 
   const submitAdminCreate = async () => {
-    if (!aName || !aEmail || !aPass || !aSecret) {
-      toast({ title: "Missing fields", description: "Fill name, email, password and secret.", variant: "destructive" });
+    if (!aName || !aEmail || !aPass) {
+      toast({ title: "Missing fields", description: "Fill name, email and password.", variant: "destructive" });
+      return;
+    }
+    const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+    if (!token) {
+      toast({ title: "Not authenticated", description: "Sign in as an admin to create users.", variant: "destructive" });
       return;
     }
     setASubmitting(true);
@@ -65,7 +72,7 @@ const UsersList = () => {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "x-admin-secret": aSecret,
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({ name: aName, email: aEmail, password: aPass, role: aRole }),
       });
@@ -119,10 +126,6 @@ const UsersList = () => {
                   <SelectItem value="admin">Admin</SelectItem>
                 </SelectContent>
               </Select>
-            </div>
-            <div>
-              <Label htmlFor="a-secret">Admin Secret</Label>
-              <Input id="a-secret" type="password" value={aSecret} onChange={(e) => setASecret(e.target.value)} placeholder="ADMIN_API_SECRET" />
             </div>
           </div>
           <div className="mt-4">

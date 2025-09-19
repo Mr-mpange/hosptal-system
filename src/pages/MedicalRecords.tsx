@@ -40,7 +40,10 @@ const MedicalRecords = () => {
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch("/api/records");
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const res = await fetch("/api/records", {
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       const data = await parseResponse(res);
       setRows(Array.isArray(data) ? data : []);
     } catch (err: any) {
@@ -56,9 +59,12 @@ const MedicalRecords = () => {
     if (!patientId || !recordType || !date) { alert("patient_id, record_type and date are required"); return; }
     setSubmitting(true);
     try {
+      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = `Bearer ${token}`;
       const res = await fetch("/api/records", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({ patient_id: Number(patientId), record_type: recordType, notes, date })
       });
       await parseResponse(res);

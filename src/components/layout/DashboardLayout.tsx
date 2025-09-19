@@ -38,17 +38,24 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
       ? '/dashboard/doctor'
       : '/dashboard/admin';
 
-    // Show all key pages for all roles so navigation is consistent
-    const items = [
+    // Base items shown to all roles
+    const base = [
       { icon: Heart, label: "Dashboard", path: dashboardPath },
       { icon: Calendar, label: "Appointments", path: "/appointments" },
-      { icon: Users, label: "Patients", path: "/patients" },
       { icon: FileText, label: "Medical Records", path: "/records" },
       { icon: CreditCard, label: "Billing", path: "/billing" },
-      { icon: Users, label: "Users", path: "/users" },
-      { icon: Settings, label: "Settings", path: "/settings" },
     ];
-    return items;
+
+    // Role-specific additions
+    if (userRole === 'doctor') {
+      base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
+    }
+    if (userRole === 'admin') {
+      base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
+      base.push({ icon: Users, label: "Users", path: "/users" });
+      base.push({ icon: Settings, label: "Settings", path: "/settings" });
+    }
+    return base;
   };
 
   const menuItems = getMenuItems();

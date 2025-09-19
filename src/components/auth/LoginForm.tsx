@@ -5,7 +5,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 
@@ -22,7 +21,6 @@ interface LoginFormProps {
 const LoginForm = ({ onLogin }: LoginFormProps) => {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"patient" | "doctor" | "admin">("patient");
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const { toast } = useToast();
@@ -48,10 +46,14 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
         try { data = JSON.parse(text); } catch { throw new Error(text || "Non-JSON response"); }
       }
       if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
-      // Normalize role from server so dashboard is chosen correctly regardless of case
-      const rawRole = String(data?.role ?? "patient").toLowerCase();
+      // Expect shape: { token, user: { id, name, email, role } }
+      const token = data?.token as string | undefined;
+      const u = data?.user || {};
+      const rawRole = String(u?.role ?? "patient").toLowerCase();
       const serverRole = (rawRole === "patient" || rawRole === "doctor" || rawRole === "admin") ? rawRole : "patient";
-      onLogin(email, password, serverRole, data?.name || email, data?.id);
+      // Persist token for subsequent API calls
+      try { if (token) localStorage.setItem("auth_token", token); } catch {}
+      onLogin(u?.email || email, password, serverRole, u?.name || email, u?.id);
       toast({ title: "Welcome!", description: `Successfully logged in as ${serverRole}` });
     } catch (err: any) {
       toast({ title: "Login Failed", description: err?.message ?? "Invalid credentials", variant: "destructive" });
@@ -82,31 +84,12 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
           
           <CardContent>
             <form onSubmit={handleSubmit} className="space-y-4">
-              {/* Role Selection */}
-              <div className="space-y-3">
-                <Label className="text-sm font-medium">Select Role</Label>
-                <RadioGroup
-                  value={role}
-                  onValueChange={(value) => setRole(value as "patient" | "doctor" | "admin")}
-                  className="flex gap-6"
-                >
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="patient" id="patient" />
-                    <Label htmlFor="patient" className="text-sm">Patient</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="doctor" id="doctor" />
-                    <Label htmlFor="doctor" className="text-sm">Doctor</Label>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <RadioGroupItem value="admin" id="admin" />
-                    <Label htmlFor="admin" className="text-sm">Admin</Label>
-                  </div>
-                </RadioGroup>
-                <p className="text-xs text-muted-foreground">
-                  Redirect after login: <span className="font-medium">/dashboard/{role}</span>. Note: your actual dashboard is determined by your account role in the system.
-                </p>
-              </div>
+              {/* Note: Role is determined by your account on the server */}
+              <Alert>
+                <AlertDescription className="text-xs">
+                  Your dashboard is determined by your account role on the server (patient/doctor/admin). No role selection needed here.
+                </AlertDescription>
+              </Alert>
 
               {/* Email */}
               <div className="space-y-2">
@@ -152,7 +135,7 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
               {/* Info */}
               <Alert>
                 <AlertDescription className="text-xs">
-                  Enter your account credentials. Your dashboard is determined by your account role on the server (patient/doctor/admin).
+                  Enter your account credentials to sign in.
                 </AlertDescription>
               </Alert>
 

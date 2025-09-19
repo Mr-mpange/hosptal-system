@@ -43,17 +43,19 @@ const PatientDashboard = () => {
       if (!userId) { setLoading(false); return; }
       setLoading(true); setError(null);
       try {
+        const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
+        const authHeaders = token ? { Authorization: `Bearer ${token}` } : undefined;
         // 1) Find patient by user id
-        const pRes = await fetch(`/api/patients/by-user/${userId}`);
+        const pRes = await fetch(`/api/patients/by-user/${userId}`, { headers: authHeaders });
         const patient = await parseResponse(pRes);
         if (!isMounted) return;
         setPatientId(patient.id);
 
         // 2) Load datasets in parallel
         const [aRes, rRes, iRes] = await Promise.all([
-          fetch(`/api/appointments?patient_id=${patient.id}`),
-          fetch(`/api/records?patient_id=${patient.id}`),
-          fetch(`/api/invoices?patient_id=${patient.id}`),
+          fetch(`/api/appointments?patient_id=${patient.id}`, { headers: authHeaders }),
+          fetch(`/api/records?patient_id=${patient.id}`, { headers: authHeaders }),
+          fetch(`/api/invoices?patient_id=${patient.id}`, { headers: authHeaders }),
         ]);
         const [aData, rData, iData] = await Promise.all([
           parseResponse(aRes),
