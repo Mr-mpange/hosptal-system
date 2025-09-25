@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
 import { BarChart3, Activity, BedDouble, Users, Calendar, Package, DollarSign, FileBarChart, Settings, Bell } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 
 // Lightweight types for data we can already fetch from existing APIs
 type Appt = { id:number; patient_id:number; date:string; time:string; notes?:string };
@@ -13,6 +14,7 @@ type InventoryItem = { id:number; name:string; quantity:number; reorder_threshol
 type Shift = { id:number; date:string; start_time:string; end_time:string; status:string; Staff?: { id:number; name:string; role:string } };
 
 const ManagerDashboard = () => {
+  const navigate = useNavigate();
   let displayName = "Manager";
   try {
     const raw = typeof window !== 'undefined' ? localStorage.getItem('auth_user') : null;
@@ -264,6 +266,37 @@ const ManagerDashboard = () => {
               </div>
             </div>
             <Badge variant="secondary">—</Badge>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Quick Actions (Manager-specific) */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="w-5 h-5" />
+            Quick Actions
+          </CardTitle>
+          <CardDescription>Manager tools</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/billing')}>
+              <DollarSign className="w-6 h-6" />
+              <span className="text-sm">Review Finance</span>
+            </Button>
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/appointments')}>
+              <Calendar className="w-6 h-6" />
+              <span className="text-sm">Manage Shifts</span>
+            </Button>
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/patients')}>
+              <Users className="w-6 h-6" />
+              <span className="text-sm">Patients</span>
+            </Button>
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/settings')}>
+              <Settings className="w-6 h-6" />
+              <span className="text-sm">Settings</span>
+            </Button>
           </div>
         </CardContent>
       </Card>

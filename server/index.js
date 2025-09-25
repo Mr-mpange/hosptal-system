@@ -66,6 +66,9 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Ensure CORS preflight (OPTIONS) for API routes succeeds and does not fall through to 404
+app.options('/api/*', cors());
+
 // Audit logging for write operations (POST/PUT/PATCH/DELETE)
 app.use((req, res, next) => {
   const method = String(req.method || 'GET').toUpperCase();
@@ -240,6 +243,53 @@ app.post('/api/admin/users', requireAuth, requireRole('admin'), async (req, res)
 // Simple ping
 app.get('/api/ping', (_req, res) => {
   res.json({ message: 'pong' });
+});
+
+// ===== Metrics: Doctor (doctor/admin)
+app.get('/api/metrics/doctor', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const qDoctorId = req.query?.doctor_id ? Number(req.query.doctor_id) : undefined;
+    const role = String(req.user?.role || '').toLowerCase();
+    const userId = Number(req.user?.sub);
+    // App may store appointments.doctor_id as the user's id when role=doctor; if not present in DB, counts will be global
+    const doctorId = Number.isInteger(qDoctorId) && qDoctorId > 0 ? qDoctorId : (role === 'doctor' ? userId : undefined);
+
+    const today = new Date().toISOString().slice(0,10);
+    const whereAppt = { date: today };
+    if (doctorId) whereAppt.doctor_id = doctorId;
+    const apptsToday = await models.Appointment.count({ where: whereAppt });
+
+    // Total patients count
+    const patientsCount = await models.Patient.count();
+
+    // Medical records count (optionally we could filter by today or by patient associations)
+    const recordsCount = await models.MedicalRecord.count();
+
+    // Invoices issued today (overall)
+    const invoicesToday = await models.Invoice.count({ where: { date: today } });
+
+    // Common record types top 5
+    const [topTypesRows] = await pool.query(
+      `SELECT record_type, COUNT(*) as c
+       FROM medical_records
+       GROUP BY record_type
+       ORDER BY c DESC
+       LIMIT 5`
+    );
+    const commonRecordTypes = Array.isArray(topTypesRows) ? topTypesRows : [];
+
+    res.json({
+      doctorId: doctorId || null,
+      appointmentsToday: apptsToday,
+      patientsCount,
+      recordsCount,
+      invoicesToday,
+      commonRecordTypes,
+    });
+  } catch (err) {
+    console.error('/api/metrics/doctor error:', err);
+    res.status(500).json({ message: 'Doctor metrics failed', details: toDbMessage(err) });
+  }
 });
 
 // ===== Metrics: Finance (manager/admin) =====

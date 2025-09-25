@@ -7,6 +7,14 @@ import { Badge } from "@/components/ui/badge";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 
 type DocAppt = { id:number; doctor_id?:number; patient_id:number; date:string; time:string; notes?:string };
+type DoctorMetrics = {
+  doctorId: number | null;
+  appointmentsToday: number;
+  patientsCount: number;
+  recordsCount: number;
+  invoicesToday: number;
+  commonRecordTypes: { record_type: string; c: number }[];
+};
 
 const DoctorDashboard = () => {
   let displayName = "Doctor";
@@ -23,6 +31,8 @@ const DoctorDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+  const [metrics, setMetrics] = useState<DoctorMetrics | null>(null);
+  const [abnormalLabs, setAbnormalLabs] = useState<number>(0);
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -41,10 +51,18 @@ const DoctorDashboard = () => {
       try {
         const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
         const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
-        const res = await fetch(`/api/appointments?doctor_id=${userId}`, { headers });
-        const data = await parseResponse(res);
+        const [aRes, mRes, labRes] = await Promise.all([
+          fetch(`/api/appointments?doctor_id=${userId}`, { headers }),
+          fetch(`/api/metrics/doctor?doctor_id=${userId}`, { headers }),
+          fetch(`/api/metrics/labs/abnormal`, { headers }),
+        ]);
+        const [aData, mData, labData] = await Promise.all([
+          parseResponse(aRes), parseResponse(mRes), parseResponse(labRes)
+        ]);
         if (!active) return;
-        setSchedule(Array.isArray(data) ? data.slice(0, 10) : []);
+        setSchedule(Array.isArray(aData) ? aData.slice(0, 10) : []);
+        setMetrics(mData as DoctorMetrics);
+        setAbnormalLabs(Number(labData?.abnormal || 0));
       } catch (e:any) {
         if (!active) return;
         setError(e?.message || 'Failed to load schedule');
@@ -93,8 +111,8 @@ const DoctorDashboard = () => {
                 <Users className="w-6 h-6 text-blue-600" />
               </div>
               <div>
-                <p className="text-2xl font-bold">156</p>
-                <p className="text-sm text-muted-foreground">Total Patients</p>
+                <p className="text-2xl font-bold">{metrics?.patientsCount ?? '—'}</p>
+                <p className="text-sm text-muted-foreground">Patients</p>
               </div>
             </div>
           </CardContent>
@@ -107,8 +125,8 @@ const DoctorDashboard = () => {
                 <TrendingUp className="w-6 h-6 text-green-600" />
               </div>
               <div>
-                <p className="text-2xl font-bold">94%</p>
-                <p className="text-sm text-muted-foreground">Patient Satisfaction</p>
+                <p className="text-2xl font-bold">{metrics?.invoicesToday ?? 0}</p>
+                <p className="text-sm text-muted-foreground">Invoices Today</p>
               </div>
             </div>
           </CardContent>
@@ -121,8 +139,8 @@ const DoctorDashboard = () => {
                 <AlertCircle className="w-6 h-6 text-red-600" />
               </div>
               <div>
-                <p className="text-2xl font-bold">3</p>
-                <p className="text-sm text-muted-foreground">Urgent Cases</p>
+                <p className="text-2xl font-bold">{abnormalLabs}</p>
+                <p className="text-sm text-muted-foreground">Abnormal Lab Results</p>
               </div>
             </div>
           </CardContent>
@@ -175,36 +193,28 @@ const DoctorDashboard = () => {
               <Users className="w-5 h-5" />
               Recent Patients
             </CardTitle>
-            <CardDescription>Recently treated patients</CardDescription>
+            <CardDescription>Common record types (top)</CardDescription>
           </CardHeader>
-          <CardContent className="space-y-4">
-            {[
-              { name: "Alice Brown", condition: "Hypertension", lastVisit: "Yesterday", status: "stable" },
-              { name: "Robert Wilson", condition: "Diabetes", lastVisit: "2 days ago", status: "improving" },
-              { name: "Lisa Garcia", condition: "Migraine", lastVisit: "1 week ago", status: "follow-up needed" },
-              { name: "David Lee", condition: "Arthritis", lastVisit: "2 weeks ago", status: "stable" },
-            ].map((patient, index) => (
-              <div key={index} className="flex items-center justify-between p-4 bg-accent/50 rounded-lg hover:bg-accent/70 transition-colors cursor-pointer">
-                <div className="flex items-center space-x-3">
+          <CardContent className="space-y-2">
+            {metrics?.commonRecordTypes?.length ? metrics.commonRecordTypes.map((r, idx) => (
+              <div key={idx} className="flex items-center justify-between p-3 bg-accent/50 rounded-lg">
+                <div className="flex items-center gap-3">
                   <Avatar className="w-10 h-10">
                     <AvatarImage src="" />
                     <AvatarFallback className="bg-primary/10 text-primary">
-                      {patient.name.split(' ').map(n => n[0]).join('')}
+                      {r.record_type?.slice(0,2)?.toUpperCase() || 'MR'}
                     </AvatarFallback>
                   </Avatar>
                   <div>
-                    <p className="font-medium">{patient.name}</p>
-                    <p className="text-sm text-muted-foreground">{patient.condition}</p>
+                    <p className="font-medium">{r.record_type || 'Record'}</p>
+                    <p className="text-sm text-muted-foreground">Count</p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <p className="text-sm text-muted-foreground">{patient.lastVisit}</p>
-                  <Badge variant="outline" className="mt-1 text-xs">
-                    {patient.status}
-                  </Badge>
-                </div>
+                <Badge variant="outline" className="mt-1 text-xs">
+                  {r.c}
+                </Badge>
               </div>
-            ))}
+            )) : <div className="text-sm text-muted-foreground">No data available.</div>}
           </CardContent>
         </Card>
       </div>
