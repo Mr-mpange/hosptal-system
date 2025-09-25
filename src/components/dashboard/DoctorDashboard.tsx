@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Users, Calendar, Clock, FileText, AlertCircle, TrendingUp } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -21,6 +22,7 @@ const DoctorDashboard = () => {
   const [schedule, setSchedule] = useState<DocAppt[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -62,7 +64,7 @@ const DoctorDashboard = () => {
           <h1 className="text-3xl font-bold text-foreground">Good morning, {displayName}</h1>
           <p className="text-muted-foreground">You have {schedule.length} appointments scheduled</p>
         </div>
-        <Button className="bg-gradient-to-r from-primary to-primary/90">
+        <Button className="bg-gradient-to-r from-primary to-primary/90" onClick={() => navigate('/patients')}>
           <Users className="w-4 h-4 mr-2" />
           View All Patients
         </Button>
@@ -218,15 +220,15 @@ const DoctorDashboard = () => {
         </CardHeader>
         <CardContent>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <Button variant="outline" className="h-20 flex-col space-y-2">
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/records')}>
               <FileText className="w-6 h-6" />
               <span className="text-sm">New Prescription</span>
             </Button>
-            <Button variant="outline" className="h-20 flex-col space-y-2">
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/appointments')}>
               <Calendar className="w-6 h-6" />
               <span className="text-sm">Schedule Appointment</span>
             </Button>
-            <Button variant="outline" className="h-20 flex-col space-y-2">
+            <Button variant="outline" className="h-20 flex-col space-y-2" onClick={() => navigate('/records')}>
               <Users className="w-6 h-6" />
               <span className="text-sm">Patient Records</span>
             </Button>

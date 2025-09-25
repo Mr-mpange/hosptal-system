@@ -70,9 +70,10 @@ const App = () => (
               <ProtectedRoute allowed={["patient"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <PatientDashboard />
                     </DashboardLayout>
                   );
@@ -86,9 +87,10 @@ const App = () => (
               <ProtectedRoute allowed={["doctor"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "doctor"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <DoctorDashboard />
                     </DashboardLayout>
                   );
@@ -102,9 +104,10 @@ const App = () => (
               <ProtectedRoute allowed={["manager"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "manager"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <ManagerDashboard />
                     </DashboardLayout>
                   );
@@ -118,9 +121,10 @@ const App = () => (
               <ProtectedRoute allowed={["admin"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "admin"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <AdminDashboard />
                     </DashboardLayout>
                   );
@@ -135,9 +139,10 @@ const App = () => (
               <ProtectedRoute>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <Appointments />
                     </DashboardLayout>
                   );
@@ -151,9 +156,10 @@ const App = () => (
               <ProtectedRoute allowed={["doctor","admin"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <Patients />
                     </DashboardLayout>
                   );
@@ -167,9 +173,10 @@ const App = () => (
               <ProtectedRoute>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <MedicalRecords />
                     </DashboardLayout>
                   );
@@ -183,9 +190,10 @@ const App = () => (
               <ProtectedRoute>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <Billing />
                     </DashboardLayout>
                   );
@@ -199,9 +207,10 @@ const App = () => (
               <ProtectedRoute allowed={["admin"]}>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <UsersList />
                     </DashboardLayout>
                   );
@@ -215,9 +224,10 @@ const App = () => (
               <ProtectedRoute>
                 {(() => {
                   const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
-                    <DashboardLayout userRole={u?.role || "patient"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <div className="p-6"><h1 className="text-2xl font-bold">Settings</h1><p className="text-muted-foreground">Coming soon...</p></div>
                     </DashboardLayout>
                   );

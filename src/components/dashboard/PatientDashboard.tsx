@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { Calendar, Clock, FileText, CreditCard, User, Activity } from "lucide-react";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -27,6 +28,7 @@ const PatientDashboard = () => {
   const [invoices, setInvoices] = useState<Invoice[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -85,7 +87,7 @@ const PatientDashboard = () => {
           <h1 className="text-3xl font-bold text-foreground">Welcome back, {displayName}</h1>
           <p className="text-muted-foreground">Here's your health overview</p>
         </div>
-        <Button className="bg-gradient-to-r from-primary to-primary/90">
+        <Button className="bg-gradient-to-r from-primary to-primary/90" onClick={() => navigate('/appointments')}>
           <Calendar className="w-4 h-4 mr-2" />
           Book Appointment
         </Button>
@@ -224,7 +226,7 @@ const PatientDashboard = () => {
               <p className="text-xs text-muted-foreground mt-1">95 mg/dL</p>
             </div>
 
-            <Button variant="outline" className="w-full">
+            <Button variant="outline" className="w-full" onClick={() => navigate('/records')}>
               <FileText className="w-4 h-4 mr-2" />
               View Full Report
             </Button>
