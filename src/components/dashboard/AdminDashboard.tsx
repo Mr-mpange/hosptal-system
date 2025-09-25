@@ -9,6 +9,7 @@ import { Progress } from "@/components/ui/progress";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
+import { useToast } from "@/components/ui/use-toast";
 
 const AdminDashboard = () => {
   const [users, setUsers] = useState<Array<{id:number; name:string; email:string; role:string;}>>([]);
@@ -31,6 +32,7 @@ const AdminDashboard = () => {
   const [newService, setNewService] = useState<{name:string; price:string}>({ name: "", price: "0" });
   const [newTemplate, setNewTemplate] = useState<{type:'sms'|'email'; key:string; subject:string; body:string; enabled:boolean}>({ type:'sms', key:'', subject:'', body:'', enabled:true });
 
+  const { toast } = useToast();
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
     let data: any = null;
@@ -180,7 +182,8 @@ const AdminDashboard = () => {
               const list = await fetch('/api/branches', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
               const data = await list.json(); setBranches(Array.isArray(data) ? data : []);
               setNewBranch({ name:'', address:'' });
-            } catch (e) { alert('Failed to create branch'); }
+              toast({ title:'Branch created', description: newBranch.name });
+            } catch (e:any) { toast({ variant:'destructive', title:'Failed to create branch', description: e?.message||'Error' }); }
           }}>Add Branch</Button>
           <div className="space-y-2 max-h-48 overflow-auto">
             {branches.map(b => (
@@ -194,7 +197,8 @@ const AdminDashboard = () => {
                     const res = await fetch(`/api/branches/${b.id}`, { method:'DELETE', headers });
                     if(!res.ok){ const t = await res.text(); throw new Error(t); }
                     setBranches(prev=>prev.filter(x=>x.id!==b.id));
-                  }catch{ alert('Failed to delete'); }
+                    toast({ title:'Branch deleted', description:`#${b.id}` });
+                  }catch(e:any){ toast({ variant:'destructive', title:'Failed to delete branch', description: e?.message||'Error' }); }
                 }}>Delete</Button>
               </div>
             ))}
@@ -233,7 +237,8 @@ const AdminDashboard = () => {
               const list = await fetch('/api/services', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
               const data = await list.json(); setServices(Array.isArray(data) ? data : []);
               setNewService({ name:'', price:'0' });
-            } catch (e) { alert('Failed to create service'); }
+              toast({ title:'Service created', description: newService.name });
+            } catch (e:any) { toast({ variant:'destructive', title:'Failed to create service', description: e?.message||'Error' }); }
           }}>Add Service</Button>
           <div className="space-y-2 max-h-48 overflow-auto">
             {services.map(s => (
@@ -247,7 +252,8 @@ const AdminDashboard = () => {
                     const res = await fetch(`/api/services/${s.id}`, { method:'DELETE', headers });
                     if(!res.ok){ const t = await res.text(); throw new Error(t); }
                     setServices(prev=>prev.filter(x=>x.id!==s.id));
-                  }catch{ alert('Failed to delete'); }
+                    toast({ title:'Service deleted', description:`#${s.id}` });
+                  }catch(e:any){ toast({ variant:'destructive', title:'Failed to delete service', description: e?.message||'Error' }); }
                 }}>Delete</Button>
               </div>
             ))}
@@ -301,7 +307,8 @@ const AdminDashboard = () => {
               const list = await fetch('/api/templates', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
               const data = await list.json(); setTemplates(Array.isArray(data) ? data : []);
               setNewTemplate({ type:'sms', key:'', subject:'', body:'', enabled:true });
-            } catch (e) { alert('Failed to create template'); }
+              toast({ title:'Template created', description: newTemplate.key });
+            } catch (e:any) { toast({ variant:'destructive', title:'Failed to create template', description: e?.message||'Error' }); }
           }}>Add Template</Button>
           <div className="space-y-2 max-h-48 overflow-auto">
             {templates.map(t => (
@@ -315,7 +322,8 @@ const AdminDashboard = () => {
                     const res = await fetch(`/api/templates/${t.id}`, { method:'DELETE', headers });
                     if(!res.ok){ const tt = await res.text(); throw new Error(tt); }
                     setTemplates(prev=>prev.filter(x=>x.id!==t.id));
-                  }catch{ alert('Failed to delete'); }
+                    toast({ title:'Template deleted', description:`#${t.id}` });
+                  }catch(e:any){ toast({ variant:'destructive', title:'Failed to delete template', description: e?.message||'Error' }); }
                 }}>Delete</Button>
               </div>
             ))}

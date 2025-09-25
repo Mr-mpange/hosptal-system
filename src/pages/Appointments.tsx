@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/use-toast";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -20,6 +21,7 @@ interface SimplePatient {
 }
 
 const Appointments = () => {
+  const { toast } = useToast();
   const [selectedPatient, setSelectedPatient] = useState<SimplePatient | null>(null);
   const [date, setDate] = useState("");
   const [time, setTime] = useState("");
@@ -104,7 +106,7 @@ const Appointments = () => {
   useEffect(() => { loadAppointments(); loadPatients(); }, []);
 
   const submit = async () => {
-    if (!selectedPatient || !date || !time) { alert("Select a patient and provide date/time"); return; }
+    if (!selectedPatient || !date || !time) { toast({ variant:'destructive', title:'Validation error', description:'Select a patient and provide date/time' }); return; }
     setSubmitting(true);
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
@@ -116,9 +118,9 @@ const Appointments = () => {
       await parseResponse(res);
       setDate(""); setTime(""); setNotes("");
       await loadAppointments();
-      alert("Appointment scheduled");
+      toast({ title:'Appointment scheduled', description:`${date} ${time}` });
     } catch (err: any) {
-      alert(`Schedule failed: ${err?.message || "Unknown error"}`);
+      toast({ variant:'destructive', title:'Schedule failed', description: err?.message || 'Unknown error' });
     } finally {
       setSubmitting(false);
     }

@@ -17,6 +17,7 @@ import MedicalRecords from "./pages/MedicalRecords";
 import Billing from "./pages/Billing";
 import UsersList from "@/components/users/UsersList";
 import { useNavigate } from "react-router-dom";
+import Notifications from "@/pages/Notifications";
 
 const queryClient = new QueryClient();
 
@@ -75,6 +76,23 @@ const App = () => (
                   return (
                     <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
                       <PatientDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/notifications"
+            element={
+              <ProtectedRoute>
+                {(() => {
+                  const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
+                      <Notifications />
                     </DashboardLayout>
                   );
                 })()}

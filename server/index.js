@@ -8,6 +8,78 @@ const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 
+app.post('/api/inventory', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { name, sku, quantity, reorder_threshold, unit } = req.body || {};
+    if (!name) return res.status(400).json({ message: 'name is required' });
+    const row = await models.InventoryItem.create({ name, sku: sku||null, quantity: Number(quantity)||0, reorder_threshold: Number(reorder_threshold)||0, unit: unit||null });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/inventory POST error:', err);
+    res.status(500).json({ message: 'Create inventory failed', details: toDbMessage(err) });
+  }
+});
+
+app.patch('/api/inventory/:id', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.InventoryItem.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const { quantity, name, reorder_threshold, unit, sku } = req.body || {};
+    await row.update({
+      quantity: quantity!==undefined ? Number(quantity) : row.quantity,
+      name: name!==undefined ? String(name) : row.name,
+      reorder_threshold: reorder_threshold!==undefined ? Number(reorder_threshold) : row.reorder_threshold,
+      unit: unit!==undefined ? (unit||null) : row.unit,
+      sku: sku!==undefined ? (sku||null) : row.sku,
+    });
+    res.json(row);
+  } catch (err) {
+    console.error('/api/inventory/:id PATCH error:', err);
+    res.status(500).json({ message: 'Update inventory failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Payments (initiate and status) =====
+app.post('/api/payments/initiate', requireAuth, async (req, res) => {
+  try {
+    const { invoice_id, method } = req.body || {};
+    const invId = Number(invoice_id);
+    if (!invId) return res.status(400).json({ message: 'invoice_id required' });
+    const inv = await models.Invoice.findByPk(invId);
+    if (!inv) return res.status(404).json({ message: 'Invoice not found' });
+    const reference = `CN-${invId}-${Date.now()}`;
+    const row = await models.Payment.create({ invoice_id: invId, patient_id: inv.patient_id, amount: inv.amount, method: method || 'control', status: 'initiated', reference });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/payments/initiate POST error:', err);
+    res.status(500).json({ message: 'Initiate payment failed', details: toDbMessage(err) });
+  }
+});
+
+app.get('/api/payments/by-invoice/:invoiceId', requireAuth, async (req, res) => {
+  try {
+    const invoiceId = Number(req.params.invoiceId);
+    const rows = await models.Payment.findAll({ where: { invoice_id: invoiceId }, order: [['id','DESC']], limit: 1 });
+    res.json(rows[0] || null);
+  } catch (err) {
+    console.error('/api/payments/by-invoice GET error:', err);
+    res.status(500).json({ message: 'Fetch payment failed', details: toDbMessage(err) });
+  }
+});
+
+app.get('/api/payments/:id', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Payment.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    res.json(row);
+  } catch (err) {
+    console.error('/api/payments/:id GET error:', err);
+    res.status(500).json({ message: 'Fetch payment failed', details: toDbMessage(err) });
+  }
+});
+
 // ===== Appointment available slots (auth) =====
 app.get('/api/appointments/available', requireAuth, async (req, res) => {
   try {
@@ -252,15 +324,51 @@ app.post('/api/notifications', requireAuth, requireRole('admin', 'manager'), asy
 app.get('/api/notifications', requireAuth, async (req, res) => {
   try {
     const role = String(req.user?.role || 'patient').toLowerCase();
-    const list = await models.Notification.findAll({
-      where: { target_role: { [Op.in]: ['all', role] } },
-      order: [['id', 'DESC']],
-      limit: 200,
-    });
-    res.json(list);
+    const page = Math.max(1, Number(req.query.page||1));
+    const limit = Math.min(200, Math.max(1, Number(req.query.limit||50)));
+    const offset = (page-1)*limit;
+    const where = { target_role: { [Op.in]: ['all', role] } };
+    if (req.query.from || req.query.to) {
+      where.created_at = {};
+      if (req.query.from) where.created_at[Op.gte] = new Date(String(req.query.from));
+      if (req.query.to) where.created_at[Op.lte] = new Date(String(req.query.to));
+    }
+    if (req.query.q) {
+      const q = String(req.query.q);
+      where[Op.or] = [
+        { title: { [Op.like]: `%${q}%` } },
+        { message: { [Op.like]: `%${q}%` } },
+      ];
+    }
+    const list = await models.Notification.findAll({ where, order: [['id','DESC']], limit, offset });
+    // mark read flags for current user
+    const userId = Number(req.user?.sub);
+    let readMap = new Set();
+    try {
+      const ids = list.map(n => n.id);
+      if (ids.length) {
+        const reads = await models.NotificationsRead.findAll({ where: { user_id: userId, notification_id: { [Op.in]: ids } }, attributes: ['notification_id'] });
+        readMap = new Set(reads.map(r => r.notification_id));
+      }
+    } catch {}
+    res.json(list.map(n => ({ ...n.toJSON(), read: readMap.has(n.id) })));
   } catch (err) {
     console.error('/api/notifications GET error:', err);
     res.status(500).json({ message: 'Fetch notifications failed', details: toDbMessage(err) });
+  }
+});
+
+// Mark notification as read
+app.post('/api/notifications/:id/read', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const userId = Number(req.user?.sub);
+    if (!id || !userId) return res.status(400).json({ message: 'Invalid' });
+    await models.NotificationsRead.findOrCreate({ where: { user_id: userId, notification_id: id }, defaults: { user_id: userId, notification_id: id } });
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/notifications/:id/read POST error:', err);
+    res.status(500).json({ message: 'Mark read failed', details: toDbMessage(err) });
   }
 });
 

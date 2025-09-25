@@ -8,6 +8,7 @@ import { BarChart3, Activity, BedDouble, Users, Calendar, Package, DollarSign, F
 import { useNavigate } from "react-router-dom";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useToast } from "@/components/ui/use-toast";
 
 // Lightweight types for data we can already fetch from existing APIs
 type Appt = { id:number; patient_id:number; date:string; time:string; notes?:string };
@@ -18,6 +19,7 @@ type Shift = { id:number; date:string; start_time:string; end_time:string; statu
 type Attendance = { id:number; date:string; status:string; clock_in?:string|null; clock_out?:string|null; Staff?: { id:number; name:string; role:string; department_id?:number|null } };
 type Staff = { id:number; name:string; role:string; department_id?:number|null };
 type Department = { id:number; name:string };
+type Bed = { id:number; ward_id:number; label:string; status:'available'|'occupied'|'maintenance' };
 
 const ManagerDashboard = () => {
   const navigate = useNavigate();
@@ -43,6 +45,9 @@ const ManagerDashboard = () => {
   const [plannerDate, setPlannerDate] = useState<string>(new Date().toISOString().slice(0,10));
   const [newShift, setNewShift] = useState<{staff_id:string; start_time:string; end_time:string}>({ staff_id: "", start_time: "08:00", end_time: "16:00" });
   const [saving, setSaving] = useState(false);
+  const [beds, setBeds] = useState<Bed[]>([]);
+  const [inventory, setInventory] = useState<InventoryItem[]>([]);
+  const { toast } = useToast();
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -61,7 +66,7 @@ const ManagerDashboard = () => {
         const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
         const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
         const today = new Date().toISOString().slice(0,10);
-        const [aRes, fRes, oRes, invRes, shRes, atRes, stRes, depRes] = await Promise.all([
+        const [aRes, fRes, oRes, invRes, shRes, atRes, stRes, depRes, bedsRes, invAllRes] = await Promise.all([
           fetch('/api/appointments', { headers }),
           fetch('/api/metrics/finance', { headers }),
           fetch('/api/metrics/occupancy', { headers }),
@@ -70,9 +75,11 @@ const ManagerDashboard = () => {
           fetch(`/api/attendance?date=${today}`, { headers }),
           fetch('/api/staff', { headers }),
           fetch('/api/departments', { headers }),
+          fetch('/api/beds', { headers }),
+          fetch('/api/inventory', { headers }),
         ]);
-        const [aData, fData, oData, invData, shData, atData, stData, depData] = await Promise.all([
-          parseResponse(aRes), parseResponse(fRes), parseResponse(oRes), parseResponse(invRes), parseResponse(shRes), parseResponse(atRes), parseResponse(stRes), parseResponse(depRes)
+        const [aData, fData, oData, invData, shData, atData, stData, depData, bedsData, invAllData] = await Promise.all([
+          parseResponse(aRes), parseResponse(fRes), parseResponse(oRes), parseResponse(invRes), parseResponse(shRes), parseResponse(atRes), parseResponse(stRes), parseResponse(depRes), parseResponse(bedsRes), parseResponse(invAllRes)
         ]);
         if (!active) return;
         setAppointments(Array.isArray(aData) ? aData.slice(0, 10) : []);
@@ -83,6 +90,8 @@ const ManagerDashboard = () => {
         setAttendance(Array.isArray(atData) ? atData.slice(0, 10) : []);
         setStaff(Array.isArray(stData) ? stData : []);
         setDepartments(Array.isArray(depData) ? depData : []);
+        setBeds(Array.isArray(bedsData) ? bedsData : []);
+        setInventory(Array.isArray(invAllData) ? invAllData : []);
       } catch (e:any) {
         if (!active) return;
         setError(e?.message || 'Failed to load dashboard data');
@@ -231,6 +240,152 @@ const ManagerDashboard = () => {
                 </div>
               ))}
               {shifts.length === 0 && <div className="text-sm text-muted-foreground">No shifts scheduled for today.</div>}
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      {/* Beds & Inventory Management */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Beds Management */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><BedDouble className="w-5 h-5"/>Beds Management</CardTitle>
+            <CardDescription>Create and update beds</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* Create Bed */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+              <div>
+                <Label htmlFor="nb-ward">Ward ID</Label>
+                <Input id="nb-ward" type="number" placeholder="e.g., 1" />
+              </div>
+              <div className="md:col-span-2">
+                <Label htmlFor="nb-label">Label</Label>
+                <Input id="nb-label" placeholder="e.g., Bed A1" />
+              </div>
+              <div className="flex items-end">
+                <Button size="sm" onClick={async ()=>{
+                  try{
+                    const wardId = Number((document.getElementById('nb-ward') as HTMLInputElement)?.value||'');
+                    const label = (document.getElementById('nb-label') as HTMLInputElement)?.value||'';
+                    if (!wardId || !label) { toast({ variant:'destructive', title:'Ward ID and Label required' }); return; }
+                    const token = localStorage.getItem('auth_token')||undefined;
+                    const headers:any = { 'Content-Type':'application/json' };
+                    if (token) headers.Authorization = `Bearer ${token}`;
+                    const res = await fetch('/api/beds', { method:'POST', headers, body: JSON.stringify({ ward_id: wardId, label }) });
+                    if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                    const row = await res.json();
+                    setBeds(prev=>[row, ...prev]);
+                    (document.getElementById('nb-ward') as HTMLInputElement).value='';
+                    (document.getElementById('nb-label') as HTMLInputElement).value='';
+                    toast({ title:'Bed created', description: `${row.label}` });
+                  }catch(e:any){ toast({ variant:'destructive', title:'Create bed failed', description: e?.message||'Error' }); }
+                }}>Add Bed</Button>
+              </div>
+            </div>
+            {/* List and quick status */}
+            <div className="space-y-2 max-h-64 overflow-auto">
+              {beds.map(b => (
+                <div key={b.id} className="flex items-center justify-between p-3 border rounded">
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{b.label} (#{b.id})</p>
+                    <p className="text-xs text-muted-foreground truncate">Ward #{b.ward_id}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <select className="border rounded h-9 px-2 capitalize" defaultValue={b.status} onChange={async (e)=>{
+                      try{
+                        const token = localStorage.getItem('auth_token')||undefined;
+                        const headers:any = { 'Content-Type':'application/json' };
+                        if (token) headers.Authorization = `Bearer ${token}`;
+                        const res = await fetch(`/api/beds/${b.id}`, { method:'PATCH', headers, body: JSON.stringify({ status: e.target.value }) });
+                        if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                        setBeds(prev => prev.map(x => x.id===b.id ? { ...x, status: e.target.value as any } : x));
+                        toast({ title:'Bed updated', description:`${b.label} → ${e.target.value}` });
+                      }catch(err:any){ toast({ variant:'destructive', title:'Failed to update bed', description: err?.message||'Error' }); }
+                    }}>
+                      <option value="available">available</option>
+                      <option value="occupied">occupied</option>
+                      <option value="maintenance">maintenance</option>
+                    </select>
+                  </div>
+                </div>
+              ))}
+              {beds.length===0 && <div className="text-sm text-muted-foreground">No beds found.</div>}
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* Inventory Management */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2"><Package className="w-5 h-5"/>Inventory Management</CardTitle>
+            <CardDescription>Create and update items</CardDescription>
+          </CardHeader>
+          <CardContent>
+            {/* Create Item */}
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 mb-3">
+              <div className="md:col-span-2">
+                <Label htmlFor="ni-name">Name</Label>
+                <Input id="ni-name" placeholder="e.g., Gloves" />
+              </div>
+              <div>
+                <Label htmlFor="ni-sku">SKU</Label>
+                <Input id="ni-sku" placeholder="optional" />
+              </div>
+              <div>
+                <Label htmlFor="ni-qty">Qty</Label>
+                <Input id="ni-qty" type="number" defaultValue={0} />
+              </div>
+              <div className="flex items-end">
+                <Button size="sm" onClick={async ()=>{
+                  try{
+                    const name = (document.getElementById('ni-name') as HTMLInputElement)?.value||'';
+                    const sku = (document.getElementById('ni-sku') as HTMLInputElement)?.value||'';
+                    const qty = Number((document.getElementById('ni-qty') as HTMLInputElement)?.value||'0');
+                    if (!name) { toast({ variant:'destructive', title:'Name required' }); return; }
+                    const token = localStorage.getItem('auth_token')||undefined;
+                    const headers:any = { 'Content-Type':'application/json' };
+                    if (token) headers.Authorization = `Bearer ${token}`;
+                    const res = await fetch('/api/inventory', { method:'POST', headers, body: JSON.stringify({ name, sku: sku||null, quantity: qty }) });
+                    if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                    const row = await res.json();
+                    setInventory(prev=>[row, ...prev]);
+                    (document.getElementById('ni-name') as HTMLInputElement).value='';
+                    (document.getElementById('ni-sku') as HTMLInputElement).value='';
+                    (document.getElementById('ni-qty') as HTMLInputElement).value='0';
+                    toast({ title:'Item created', description: `${row.name}` });
+                  }catch(e:any){ toast({ variant:'destructive', title:'Create item failed', description: e?.message||'Error' }); }
+                }}>Add Item</Button>
+              </div>
+            </div>
+            {/* List and quick qty */}
+            <div className="space-y-2 max-h-64 overflow-auto">
+              {inventory.map(it => (
+                <div key={it.id} className="flex items-center justify-between p-3 border rounded gap-3">
+                  <div className="min-w-0">
+                    <p className="font-medium truncate">{it.name}</p>
+                    <p className="text-xs text-muted-foreground truncate">Threshold {it.reorder_threshold}{it.unit ? ` ${it.unit}` : ''}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Input type="number" className="w-24" defaultValue={it.quantity} onBlur={async (e)=>{
+                      try{
+                        const qty = Number((e.target as HTMLInputElement).value);
+                        if (isNaN(qty)) return;
+                        const token = localStorage.getItem('auth_token')||undefined;
+                        const headers:any = { 'Content-Type':'application/json' };
+                        if (token) headers.Authorization = `Bearer ${token}`;
+                        const res = await fetch(`/api/inventory/${it.id}`, { method:'PATCH', headers, body: JSON.stringify({ quantity: qty }) });
+                        if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                        setInventory(prev => prev.map(x => x.id===it.id ? { ...x, quantity: qty } : x));
+                        toast({ title:'Inventory updated', description:`${it.name} → ${qty}` });
+                      }catch(err:any){ toast({ variant:'destructive', title:'Failed to update inventory', description: err?.message||'Error' }); }
+                    }} />
+                    <span className="text-sm text-muted-foreground">{it.unit || ''}</span>
+                  </div>
+                </div>
+              ))}
+              {inventory.length===0 && <div className="text-sm text-muted-foreground">No inventory items.</div>}
             </div>
           </CardContent>
         </Card>
@@ -402,7 +557,7 @@ const ManagerDashboard = () => {
                 const listRes = await fetch(`/api/shifts?date=${plannerDate}`, { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
                 const listData = await listRes.json();
                 setShifts(Array.isArray(listData) ? listData : []);
-              }catch(e){ console.error('create shift error', e); alert('Failed to create shift'); }
+              }catch(e:any){ console.error('create shift error', e); toast({ variant:'destructive', title:'Failed to create shift', description: e?.message||'Error' }); }
               finally{ setSaving(false); }
             }}>Create Shift</Button>
           </div>
@@ -422,7 +577,7 @@ const ManagerDashboard = () => {
                       if (token) headers.Authorization = `Bearer ${token}`;
                       const res = await fetch(`/api/shifts/${s.id}`, { method:'PUT', headers, body: JSON.stringify({ status: e.target.value }) });
                       if(!res.ok){ const t = await res.text(); throw new Error(t); }
-                    }catch(err){ console.error('update shift error', err); alert('Failed to update shift'); }
+                    }catch(err:any){ console.error('update shift error', err); toast({ variant:'destructive', title:'Failed to update shift', description: err?.message||'Error' }); }
                   }}>
                     <option value="scheduled">scheduled</option>
                     <option value="completed">completed</option>
@@ -437,7 +592,7 @@ const ManagerDashboard = () => {
                       if(!res.ok){ const t = await res.text(); throw new Error(t); }
                       // remove locally
                       setShifts(prev => prev.filter(x=>x.id !== s.id));
-                    }catch(err){ console.error('delete shift error', err); alert('Failed to delete shift'); }
+                    }catch(err:any){ console.error('delete shift error', err); toast({ variant:'destructive', title:'Failed to delete shift', description: err?.message||'Error' }); }
                   }}>Delete</Button>
                 </div>
               </div>
@@ -470,7 +625,8 @@ const ManagerDashboard = () => {
                       if (token) headers.Authorization = `Bearer ${token}`;
                       const res = await fetch(`/api/staff/${s.id}/department`, { method:'PUT', headers, body: JSON.stringify({ department_id: depId }) });
                       if(!res.ok){ const t = await res.text(); throw new Error(t); }
-                    }catch(err){ console.error('assign dep error', err); alert('Failed to update department'); }
+                      toast({ title:'Department updated', description: `${s.name}` });
+                    }catch(err:any){ console.error('assign dep error', err); toast({ variant:'destructive', title:'Failed to update department', description: err?.message||'Error' }); }
                   }}>
                     <option value="">Unassigned</option>
                     {departments.map(d => (

@@ -1,4 +1,5 @@
 import NotificationsBell from "@/components/NotificationsBell";
+import { useToast } from "@/components/ui/use-toast";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Calendar, Clock, FileText, CreditCard, User, Activity, FlaskConical } from "lucide-react";
@@ -43,6 +44,7 @@ const PatientDashboard = () => {
   const [submitting, setSubmitting] = useState(false);
   const [slots, setSlots] = useState<string[]>([]);
   const [notifCount, setNotifCount] = useState<number>(0);
+  const { toast } = useToast();
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -226,7 +228,8 @@ const PatientDashboard = () => {
                   setAppts(Array.isArray(aData) ? aData.slice(0,5) : []);
                 } catch {}
                 setShowBook(false);
-              }catch(e){ console.error('book appt error', e); alert('Failed to book appointment (slot may be unavailable)'); }
+                toast({ title:'Appointment requested', description:`${bookDate} ${bookTime}` });
+              }catch(e:any){ console.error('book appt error', e); toast({ variant:'destructive', title:'Failed to book appointment', description: e?.message||'Slot may be unavailable' }); }
               finally{ setSubmitting(false); }
             }}>Book</Button>
           </DialogFooter>

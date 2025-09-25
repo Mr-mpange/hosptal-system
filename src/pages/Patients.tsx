@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { useToast } from "@/components/ui/use-toast";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -14,6 +15,7 @@ interface PatientRow {
 }
 
 const Patients = () => {
+  const { toast } = useToast();
   const [form, setForm] = useState({ name: "", email: "", phone: "", notes: "" });
   const [submitting, setSubmitting] = useState(false);
 
@@ -61,7 +63,7 @@ const Patients = () => {
   useEffect(() => { load(); }, []);
 
   const createPatient = async () => {
-    if (!form.name) { alert("Name is required"); return; }
+    if (!form.name) { toast({ variant:'destructive', title:'Validation error', description:'Name is required' }); return; }
     setSubmitting(true);
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders };
@@ -73,9 +75,9 @@ const Patients = () => {
       await parseResponse(res);
       setForm({ name: "", email: "", phone: "", notes: "" });
       await load();
-      alert("Patient created");
+      toast({ title:'Patient created', description: form.name });
     } catch (err: any) {
-      alert(`Create failed: ${err?.message || "Unknown error"}`);
+      toast({ variant:'destructive', title:'Create failed', description: err?.message || 'Unknown error' });
     } finally {
       setSubmitting(false);
     }
@@ -103,9 +105,9 @@ const Patients = () => {
       await parseResponse(res);
       await load();
       cancelEdit();
-      alert("Patient updated");
+      toast({ title:'Patient updated', description: editForm.name || `#${id}` });
     } catch (err: any) {
-      alert(`Update failed: ${err?.message || "Unknown error"}`);
+      toast({ variant:'destructive', title:'Update failed', description: err?.message || 'Unknown error' });
     } finally {
       setSubmitting(false);
     }
@@ -122,9 +124,9 @@ const Patients = () => {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
       await load();
-      alert("Patient deleted");
+      toast({ title:'Patient deleted', description:`#${id}` });
     } catch (err: any) {
-      alert(`Delete failed: ${err?.message || "Unknown error"}`);
+      toast({ variant:'destructive', title:'Delete failed', description: err?.message || 'Unknown error' });
     } finally {
       setDeletingId(null);
     }

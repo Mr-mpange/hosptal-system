@@ -52,6 +52,7 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
       { icon: Calendar, label: "Appointments", path: "/appointments" },
       { icon: FileText, label: "Medical Records", path: "/records" },
       { icon: CreditCard, label: "Billing", path: "/billing" },
+      { icon: Bell, label: "Notifications", path: "/notifications" },
     ];
 
     // Role-specific additions

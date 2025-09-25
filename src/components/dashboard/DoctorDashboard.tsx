@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Textarea } from "@/components/ui/textarea";
 import NotificationsBell from "@/components/NotificationsBell";
+import { useToast } from "@/components/ui/use-toast";
 
 type DocAppt = { id:number; doctor_id?:number; patient_id:number; date:string; time:string; notes?:string };
 type DoctorMetrics = {
@@ -57,6 +58,7 @@ const DoctorDashboard = () => {
   const [resDate, setResDate] = useState<string>(new Date().toISOString().slice(0,10));
   const [resTime, setResTime] = useState<string>("09:00");
   const [resSlots, setResSlots] = useState<string[]>([]);
+  const { toast } = useToast();
 
   // Helpers
   const authHeaders = () => {
@@ -258,14 +260,16 @@ const DoctorDashboard = () => {
                         const res = await fetch(`/api/appointments/${a.id}/approve`, { method:'POST', headers: authHeaders() });
                         if (!res.ok) { const t = await res.text(); throw new Error(t); }
                         await refreshSchedule();
-                      } catch (e:any) { alert(`Approve failed: ${e?.message||'Unknown error'}`); }
+                        toast({ title: 'Appointment approved', description: `#${a.id} approved` });
+                      } catch (e:any) { toast({ variant:'destructive', title:'Approve failed', description: e?.message||'Unknown error' }); }
                     }}>Approve</Button>
                     <Button size="sm" variant="outline" onClick={async ()=>{
                       try {
                         const res = await fetch(`/api/appointments/${a.id}/reject`, { method:'POST', headers: authHeaders() });
                         if (!res.ok) { const t = await res.text(); throw new Error(t); }
                         await refreshSchedule();
-                      } catch (e:any) { alert(`Reject failed: ${e?.message||'Unknown error'}`); }
+                        toast({ title:'Appointment rejected', description:`#${a.id} rejected` });
+                      } catch (e:any) { toast({ variant:'destructive', title:'Reject failed', description: e?.message||'Unknown error' }); }
                     }}>Reject</Button>
                     <Button size="sm" onClick={()=>{ setShowRes(true); setResApptId(a.id); setResDate(a.date); setResTime(a.time); }}>Reschedule</Button>
                   </div>
@@ -450,7 +454,7 @@ const DoctorDashboard = () => {
                 if(!res.ok){ const t = await res.text(); throw new Error(t); }
                 setShowRx(false);
                 setFormPatientId(""); setFormDiagnosis(""); setFormMeds(""); setFormNotes("");
-              }catch(e){ console.error('rx save error', e); alert('Failed to save prescription'); }
+              }catch(e){ console.error('rx save error', e); toast({ variant:'destructive', title:'Failed to save prescription' }); }
               finally{ setSubmitting(false); }
             }}>Save</Button>
           </DialogFooter>
@@ -530,7 +534,7 @@ const DoctorDashboard = () => {
                 if(!res.ok){ const t = await res.text(); throw new Error(t); }
                 setShowLab(false);
                 setFormPatientId(""); setFormTests(""); setFormNotes("");
-              }catch(e){ console.error('lab save error', e); alert('Failed to create lab order'); }
+              }catch(e){ console.error('lab save error', e); toast({ variant:'destructive', title:'Failed to create lab order' }); }
               finally{ setSubmitting(false); }
             }}>Create</Button>
           </DialogFooter>

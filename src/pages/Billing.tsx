@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useToast } from "@/components/ui/use-toast";
 
 interface InvoiceRow {
   id: number;
@@ -20,6 +21,7 @@ interface SimplePatient {
 }
 
 const Billing = () => {
+  const { toast } = useToast();
   const [selectedPatient, setSelectedPatient] = useState<SimplePatient | null>(null);
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState("");
@@ -47,15 +49,26 @@ const Billing = () => {
     return data;
   };
 
-  const pay = async (id: number) => {
+  const initiate = async (id: number) => {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
-      const res = await fetch(`/api/invoices/${id}/pay`, { method: 'POST', headers, body: JSON.stringify({ method: 'mock' }) });
-      await parseResponse(res);
-      await loadInvoices();
-      alert('Payment successful');
+      const res = await fetch(`/api/payments/initiate`, { method: 'POST', headers, body: JSON.stringify({ invoice_id: id, method: 'control' }) });
+      const p = await parseResponse(res);
+      toast({ title:'Control number generated', description:`Ref: ${p?.reference || 'N/A'}` });
     } catch (err: any) {
-      alert(`Payment failed: ${err?.message || 'Unknown error'}`);
+      toast({ variant:'destructive', title:'Initiate failed', description: err?.message || 'Unknown error' });
+    }
+  };
+
+  const checkStatus = async (invoiceId: number) => {
+    try {
+      const res = await fetch(`/api/payments/by-invoice/${invoiceId}`, { headers: authHeaders() });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      const p = await res.json();
+      if (!p) { toast({ title:'No payment found', description:`Invoice #${invoiceId}` }); return; }
+      toast({ title:`Payment ${p.status}`, description:`Ref: ${p.reference || 'N/A'} • Amount: ${p.amount}` });
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Status check failed', description: e?.message || 'Unknown error' });
     }
   };
 
@@ -141,12 +154,12 @@ const Billing = () => {
       a.remove();
       URL.revokeObjectURL(url);
     } catch (err: any) {
-      alert(`Download failed: ${err?.message || 'Unknown error'}`);
+      toast({ variant:'destructive', title:'Download failed', description: err?.message || 'Unknown error' });
     }
   };
 
   const submit = async () => {
-    if (!selectedPatient || !amount || !date) { alert("Select patient and provide amount/date"); return; }
+    if (!selectedPatient || !amount || !date) { toast({ variant:'destructive', title:'Validation error', description:'Select patient and provide amount/date' }); return; }
     setSubmitting(true);
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
@@ -158,9 +171,9 @@ const Billing = () => {
       await parseResponse(res);
       setAmount(""); setDate(""); setStatus("pending");
       await loadInvoices();
-      alert("Invoice created");
+      toast({ title:'Invoice created', description:`#${selectedPatient.id} - ${Number(amount).toFixed(2)}` });
     } catch (err: any) {
-      alert(`Create failed: ${err?.message || "Unknown error"}`);
+      toast({ variant:'destructive', title:'Create failed', description: err?.message || 'Unknown error' });
     } finally {
       setSubmitting(false);
     }
@@ -282,8 +295,9 @@ const Billing = () => {
                       <td className="py-2 pr-4 capitalize">{inv.status}</td>
                       <td className="py-2 pr-4 space-x-2">
                         {inv.status === 'pending' && (
-                          <Button size="sm" onClick={() => pay(inv.id)}>Pay</Button>
+                          <Button size="sm" onClick={() => initiate(inv.id)}>Initiate</Button>
                         )}
+                        <Button size="sm" variant="outline" onClick={() => checkStatus(inv.id)}>Check</Button>
                         <Button size="sm" variant="secondary" onClick={() => download(inv.id)}>Download</Button>
                       </td>
                     </tr>

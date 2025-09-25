@@ -245,6 +245,14 @@ export async function initModels() {
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'templates' });
 
+  // Notifications Read (per-user read state)
+  models.NotificationsRead = sequelize.define('notifications_read', {
+    id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+    user_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+    notification_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+    read_at: { type: DataTypes.DATE, allowNull: false, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+  }, { tableName: 'notifications_read', indexes: [ { unique: true, fields: ['user_id','notification_id'] } ] });
+
   // Payments (mock)
   models.Payment = sequelize.define('payments', {
     id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
