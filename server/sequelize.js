@@ -38,7 +38,7 @@ export async function initModels() {
     name: { type: DataTypes.STRING(120), allowNull: false },
     email: { type: DataTypes.STRING(160), allowNull: false, unique: true },
     password_hash: { type: DataTypes.STRING(255), allowNull: false },
-    role: { type: DataTypes.ENUM('patient','doctor','admin'), allowNull: false, defaultValue: 'patient' },
+    role: { type: DataTypes.ENUM('patient','doctor','admin','laboratorist','manager'), allowNull: false, defaultValue: 'patient' },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'users' });
 
@@ -69,7 +69,7 @@ export async function initModels() {
     id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
     patient_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
     record_type: { type: DataTypes.STRING(80), allowNull: false },
-    notes: { type: DataTypes.STRING(500), allowNull: true },
+    notes: { type: DataTypes.TEXT, allowNull: true },
     date: { type: DataTypes.DATEONLY, allowNull: false },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'medical_records' });
@@ -83,6 +83,16 @@ export async function initModels() {
     status: { type: DataTypes.ENUM('pending','paid','void'), allowNull: false, defaultValue: 'pending' },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'invoices' });
+
+  // Notifications
+  models.Notification = sequelize.define('notifications', {
+    id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+    title: { type: DataTypes.STRING(160), allowNull: false },
+    message: { type: DataTypes.STRING(1000), allowNull: false },
+    target_role: { type: DataTypes.ENUM('all','patient','doctor','admin','laboratorist','manager'), allowNull: false, defaultValue: 'all' },
+    created_by: { type: DataTypes.INTEGER.UNSIGNED, allowNull: true }, // users.id
+    created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+  }, { tableName: 'notifications' });
 
   // Associations
   models.Patient.hasMany(models.Appointment, { foreignKey: 'patient_id' });

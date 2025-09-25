@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,15 +14,16 @@ interface PatientRow {
 }
 
 const Patients = () => {
-  const [name, setName] = useState("");
-  const [email, setEmail] = useState("");
-  const [phone, setPhone] = useState("");
-  const [notes, setNotes] = useState("");
+  const [form, setForm] = useState({ name: "", email: "", phone: "", notes: "" });
   const [submitting, setSubmitting] = useState(false);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<PatientRow[]>([]);
+
+  const [editingId, setEditingId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState({ name: "", email: "", phone: "", notes: "" });
+  const [deletingId, setDeletingId] = useState<number | null>(null);
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -36,14 +37,18 @@ const Patients = () => {
     return data;
   };
 
+  const authHeaders = useMemo(() => {
+    const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    return headers;
+  }, []);
+
   const load = async () => {
     setLoading(true);
     setError(null);
     try {
-      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
-      const res = await fetch("/api/patients", {
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
+      const res = await fetch("/api/patients", { headers: authHeaders });
       const data = await parseResponse(res);
       setRows(Array.isArray(data) ? data : []);
     } catch (err: any) {
@@ -55,26 +60,73 @@ const Patients = () => {
 
   useEffect(() => { load(); }, []);
 
-  const submit = async () => {
-    if (!name) { alert("Name is required"); return; }
+  const createPatient = async () => {
+    if (!form.name) { alert("Name is required"); return; }
     setSubmitting(true);
     try {
-      const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (token) headers["Authorization"] = `Bearer ${token}`;
+      const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders };
       const res = await fetch("/api/patients", {
         method: "POST",
         headers,
-        body: JSON.stringify({ name, email, phone, notes })
+        body: JSON.stringify(form)
       });
       await parseResponse(res);
-      setName(""); setEmail(""); setPhone(""); setNotes("");
+      setForm({ name: "", email: "", phone: "", notes: "" });
       await load();
-      alert("Patient saved");
+      alert("Patient created");
     } catch (err: any) {
-      alert(`Save failed: ${err?.message || "Unknown error"}`);
+      alert(`Create failed: ${err?.message || "Unknown error"}`);
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const startEdit = (p: PatientRow) => {
+    setEditingId(p.id);
+    setEditForm({ name: p.name || "", email: p.email || "", phone: p.phone || "", notes: p.notes || "" });
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setEditForm({ name: "", email: "", phone: "", notes: "" });
+  };
+
+  const updatePatient = async (id: number) => {
+    setSubmitting(true);
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders };
+      const res = await fetch(`/api/patients/${id}`, {
+        method: "PUT",
+        headers,
+        body: JSON.stringify(editForm)
+      });
+      await parseResponse(res);
+      await load();
+      cancelEdit();
+      alert("Patient updated");
+    } catch (err: any) {
+      alert(`Update failed: ${err?.message || "Unknown error"}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const deletePatient = async (id: number) => {
+    if (!confirm("Delete this patient? This cannot be undone.")) return;
+    setDeletingId(id);
+    try {
+      const res = await fetch(`/api/patients/${id}`, {
+        method: "DELETE",
+        headers: authHeaders
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
+      await load();
+      alert("Patient deleted");
+    } catch (err: any) {
+      alert(`Delete failed: ${err?.message || "Unknown error"}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -90,23 +142,23 @@ const Patients = () => {
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             <div>
               <Label htmlFor="p-name">Full Name</Label>
-              <Input id="p-name" placeholder="Full name" value={name} onChange={(e) => setName(e.target.value)} />
+              <Input id="p-name" placeholder="Full name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </div>
             <div>
               <Label htmlFor="p-email">Email</Label>
-              <Input id="p-email" type="email" placeholder="patient@example.com" value={email} onChange={(e) => setEmail(e.target.value)} />
+              <Input id="p-email" type="email" placeholder="patient@example.com" value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} />
             </div>
             <div>
               <Label htmlFor="p-phone">Phone</Label>
-              <Input id="p-phone" placeholder="(+255) 700 000 000" value={phone} onChange={(e) => setPhone(e.target.value)} />
+              <Input id="p-phone" placeholder="(+255) 700 000 000" value={form.phone} onChange={(e) => setForm({ ...form, phone: e.target.value })} />
             </div>
             <div className="md:col-span-2 lg:col-span-3">
               <Label htmlFor="p-notes">Notes</Label>
-              <Input id="p-notes" placeholder="Optional notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+              <Input id="p-notes" placeholder="Optional notes" value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </div>
           </div>
           <div className="mt-4">
-            <Button onClick={submit} disabled={submitting}>{submitting ? "Saving..." : "Save"}</Button>
+            <Button onClick={createPatient} disabled={submitting}>{submitting ? "Saving..." : "Save"}</Button>
           </div>
         </CardContent>
       </Card>
@@ -128,21 +180,49 @@ const Patients = () => {
                     <th className="py-2 pr-4">Email</th>
                     <th className="py-2 pr-4">Phone</th>
                     <th className="py-2 pr-4">Created</th>
+                    <th className="py-2 pr-4">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
                   {rows.map(p => (
-                    <tr key={p.id} className="border-b last:border-0">
+                    <tr key={p.id} className="border-b last:border-0 align-top">
                       <td className="py-2 pr-4">{p.id}</td>
-                      <td className="py-2 pr-4">{p.name}</td>
-                      <td className="py-2 pr-4">{p.email || ""}</td>
-                      <td className="py-2 pr-4">{p.phone || ""}</td>
+                      <td className="py-2 pr-4">
+                        {editingId === p.id ? (
+                          <Input value={editForm.name} onChange={(e) => setEditForm({ ...editForm, name: e.target.value })} />
+                        ) : p.name}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {editingId === p.id ? (
+                          <Input type="email" value={editForm.email} onChange={(e) => setEditForm({ ...editForm, email: e.target.value })} />
+                        ) : (p.email || "")}
+                      </td>
+                      <td className="py-2 pr-4">
+                        {editingId === p.id ? (
+                          <Input value={editForm.phone} onChange={(e) => setEditForm({ ...editForm, phone: e.target.value })} />
+                        ) : (p.phone || "")}
+                      </td>
                       <td className="py-2 pr-4">{p.created_at ? new Date(p.created_at).toLocaleString() : ""}</td>
+                      <td className="py-2 pr-4 space-x-2">
+                        {editingId === p.id ? (
+                          <>
+                            <Button size="sm" onClick={() => updatePatient(p.id)} disabled={submitting}>Save</Button>
+                            <Button size="sm" variant="secondary" onClick={cancelEdit}>Cancel</Button>
+                          </>
+                        ) : (
+                          <>
+                            <Button size="sm" variant="secondary" onClick={() => startEdit(p)}>Edit</Button>
+                            <Button size="sm" variant="destructive" onClick={() => deletePatient(p.id)} disabled={deletingId === p.id}>
+                              {deletingId === p.id ? 'Deleting...' : 'Delete'}
+                            </Button>
+                          </>
+                        )}
+                      </td>
                     </tr>
                   ))}
                   {rows.length === 0 && (
                     <tr>
-                      <td colSpan={5} className="py-4 text-muted-foreground">No patients found.</td>
+                      <td colSpan={6} className="py-4 text-muted-foreground">No patients found.</td>
                     </tr>
                   )}
                 </tbody>
