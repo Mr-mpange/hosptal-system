@@ -66,6 +66,31 @@ app.use((req, _res, next) => {
   next();
 });
 
+// Audit logging for write operations (POST/PUT/PATCH/DELETE)
+app.use((req, res, next) => {
+  const method = String(req.method || 'GET').toUpperCase();
+  const isWrite = method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS';
+  if (!isWrite) return next();
+  const start = Date.now();
+  res.on('finish', async () => {
+    try {
+      // Only log if models are initialized and table exists
+      if (!models?.AuditLog) return;
+      const userId = req.user?.sub ? Number(req.user.sub) : null;
+      const action = `${method} ${req.path}`;
+      const entityMatch = String(req.path || '').split('/').filter(Boolean);
+      const entity = entityMatch[1] || 'unknown'; // e.g., /api/patients/123 -> 'patients'
+      const entityId = (() => { const id = Number(entityMatch[2]); return Number.isFinite(id) ? id : null; })();
+      const meta = JSON.stringify({ query: req.query || {}, statusCode: res.statusCode, durationMs: Date.now() - start });
+      await models.AuditLog.create({ user_id: userId || null, action, entity, entity_id: entityId, meta });
+    } catch (e) {
+      // Do not crash request flow for logging errors
+      console.warn('[audit] log failed:', e?.message || e);
+    }
+  });
+  next();
+});
+
 // Simple API root to verify server is up
 app.get('/api', (_req, res) => {
   res.json({ status: 'ok', message: 'API running', endpoints: ['GET /api/health', 'POST /api/login', 'POST /api/register'] });
@@ -217,6 +242,151 @@ app.get('/api/ping', (_req, res) => {
   res.json({ message: 'pong' });
 });
 
+// ===== Metrics: Finance (manager/admin) =====
+app.get('/api/metrics/finance', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { from, to } = req.query || {};
+    const where = {};
+    if (from) where.date = { [Op.gte]: String(from) };
+    if (to) where.date = where.date ? { ...where.date, [Op.lte]: String(to) } : { [Op.lte]: String(to) };
+    const today = new Date().toISOString().slice(0,10);
+    const list = await models.Invoice.findAll({ where });
+    let total = 0, pending = 0, paid = 0, todayTotal = 0;
+    for (const inv of list) {
+      const amt = Number(inv.amount || 0);
+      total += amt;
+      if (String(inv.status) === 'pending') pending += amt;
+      if (String(inv.status) === 'paid') paid += amt;
+      if (String(inv.date) === today) todayTotal += amt;
+    }
+    res.json({ total, pending, paid, todayTotal, count: list.length });
+  } catch (err) {
+    console.error('/api/metrics/finance error:', err);
+    res.status(500).json({ message: 'Finance metrics failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Metrics: Occupancy (manager/admin) =====
+app.get('/api/metrics/occupancy', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    // total beds and occupied based on current open admissions (discharged_at IS NULL)
+    const totalBeds = await models.Bed.count();
+    const occupiedAdmissions = await models.Admission.count({ where: { discharged_at: null } });
+    const occupiedBeds = Math.min(occupiedAdmissions, totalBeds);
+    const freeBeds = Math.max(totalBeds - occupiedBeds, 0);
+    // by department (via ward -> department)
+    const wards = await models.Ward.findAll({ include: [{ model: models.Department }] });
+    const beds = await models.Bed.findAll();
+    const admissions = await models.Admission.findAll({ where: { discharged_at: null } });
+    const occupiedByBedId = new Set(admissions.map(a => Number(a.bed_id)).filter(Boolean));
+    const wardsMap = new Map();
+    for (const w of wards) {
+      const depName = w.Department?.name || 'Unknown';
+      if (!wardsMap.has(depName)) wardsMap.set(depName, { total: 0, occupied: 0 });
+    }
+    for (const b of beds) {
+      const w = wards.find(x => Number(x.id) === Number(b.ward_id));
+      const depName = w?.Department?.name || 'Unknown';
+      if (!wardsMap.has(depName)) wardsMap.set(depName, { total: 0, occupied: 0 });
+      const row = wardsMap.get(depName);
+      row.total += 1;
+      if (occupiedByBedId.has(Number(b.id)) || String(b.status) === 'occupied') row.occupied += 1;
+    }
+    const byDepartment = Array.from(wardsMap.entries()).map(([department, v]) => ({ department, total: v.total, occupied: v.occupied, free: Math.max(v.total - v.occupied, 0) }));
+    res.json({ totalBeds, occupiedBeds, freeBeds, byDepartment });
+  } catch (err) {
+    console.error('/api/metrics/occupancy error:', err);
+    res.status(500).json({ message: 'Occupancy metrics failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Inventory: low stock (manager/admin)
+app.get('/api/inventory', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const low = String(req.query.low_stock || '').toLowerCase() === 'true';
+    let where = {};
+    if (low) {
+      // quantity <= reorder_threshold
+      where = sequelize.where(
+        sequelize.col('quantity'),
+        { [Op.lte]: sequelize.col('reorder_threshold') }
+      );
+    }
+    const list = await models.InventoryItem.findAll({ where: low ? undefined : {}, order: [['name','ASC']], limit: 500 });
+    if (low) {
+      const filtered = list.filter(i => Number(i.quantity) <= Number(i.reorder_threshold));
+      return res.json(filtered);
+    }
+    res.json(list);
+  } catch (err) {
+    console.error('/api/inventory GET error:', err);
+    res.status(500).json({ message: 'Fetch inventory failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Shifts by date (manager/admin)
+app.get('/api/shifts', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const date = String(req.query.date || '').slice(0,10);
+    const where = date ? { date } : {};
+    const list = await models.Shift.findAll({ where, include: [{ model: models.Staff, attributes: ['id','name','role'] }] , order: [['date','ASC'],['start_time','ASC']], limit: 500 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/shifts GET error:', err);
+    res.status(500).json({ message: 'Fetch shifts failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Lab Results (basic endpoints)
+app.post('/api/labs', requireAuth, requireRole('doctor','admin','laboratorist'), async (req, res) => {
+  try {
+    const { patient_id, test_type, value, unit, normal_range, flag, date } = req.body || {};
+    const pid = Number(patient_id);
+    if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ message: 'Invalid patient_id' });
+    if (!test_type || !date) return res.status(400).json({ message: 'Missing required fields: test_type, date' });
+    const patient = await models.Patient.findByPk(pid);
+    if (!patient) return res.status(400).json({ message: 'Invalid patient_id: patient does not exist' });
+    const allowed = ['normal','abnormal','critical'];
+    const flg = allowed.includes(String(flag)) ? String(flag) : 'normal';
+    const row = await models.LabResult.create({ patient_id: pid, test_type, value, unit, normal_range, flag: flg, date });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/labs POST error:', err);
+    res.status(500).json({ message: 'Create lab result failed', details: toDbMessage(err) });
+  }
+});
+
+app.get('/api/labs', requireAuth, async (req, res) => {
+  try {
+    const { patient_id, flag } = req.query || {};
+    const where = {};
+    if (req.user?.role === 'patient') {
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+      const pid = row?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else if (patient_id) {
+      where.patient_id = Number(patient_id);
+    }
+    if (flag) where.flag = String(flag);
+    const list = await models.LabResult.findAll({ where, include: [{ model: models.Patient, attributes: ['id','name','email'] }], order: [['id','DESC']], limit: 200 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/labs GET error:', err);
+    res.status(500).json({ message: 'Fetch lab results failed', details: toDbMessage(err) });
+  }
+});
+
+// Labs abnormal metric (manager/doctor)
+app.get('/api/metrics/labs/abnormal', requireAuth, requireRole('admin','manager','doctor'), async (_req, res) => {
+  try {
+    const abnormal = await models.LabResult.count({ where: { flag: { [Op.in]: ['abnormal','critical'] } } });
+    res.json({ abnormal });
+  } catch (err) {
+    console.error('/api/metrics/labs/abnormal GET error:', err);
+    res.status(500).json({ message: 'Fetch labs metric failed', details: toDbMessage(err) });
+  }
+});
 // Registration endpoint
 app.post('/api/register', async (req, res) => {
   try {

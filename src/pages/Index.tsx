@@ -7,7 +7,7 @@ interface User {
   id?: number;
   email: string;
   name: string;
-  role: "patient" | "doctor" | "admin";
+  role: "patient" | "doctor" | "admin" | "manager";
 }
 
 const Index = () => {
@@ -54,14 +54,21 @@ const Index = () => {
     return () => controller.abort();
   }, []);
 
-  const handleLogin = (email: string, _password: string, role: "patient" | "doctor" | "admin", nameFromServer?: string, idFromServer?: number) => {
+  const handleLogin = (email: string, _password: string, role: "patient" | "doctor" | "admin" | "manager", nameFromServer?: string, idFromServer?: number) => {
     // Use the name from the server when available; fallback to email prefix
     const fallbackName = email.includes("@") ? email.split("@")[0] : email;
     const userData: User = { id: idFromServer, email, name: nameFromServer || fallbackName, role };
     setUser(userData);
     try { localStorage.setItem("auth_user", JSON.stringify(userData)); } catch {}
     // Redirect user to their role-specific dashboard
-    const path = role === "patient" ? "/dashboard/patient" : role === "doctor" ? "/dashboard/doctor" : "/dashboard/admin";
+    const path =
+      role === "patient"
+        ? "/dashboard/patient"
+        : role === "doctor"
+        ? "/dashboard/doctor"
+        : role === "manager"
+        ? "/dashboard/manager"
+        : "/dashboard/admin";
     try { navigate(path, { replace: true }); } catch {}
   };
 

@@ -128,7 +128,7 @@ const Appointments = () => {
     <div className="p-6 space-y-6">
       <h1 className="text-2xl font-bold">Appointments</h1>
 
-      {role !== 'patient' && (
+      {role !== 'patient' ? (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
           <CardHeader>
@@ -184,6 +184,33 @@ const Appointments = () => {
             {!selectedPatient && (
               <div className="text-sm text-muted-foreground mb-3">Select a patient from the list</div>
             )}
+            <div className="grid grid-cols-1 gap-4">
+              <div>
+                <Label htmlFor="a-date">Date</Label>
+                <Input id="a-date" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="a-time">Time</Label>
+                <Input id="a-time" type="time" value={time} onChange={(e) => setTime(e.target.value)} />
+              </div>
+              <div>
+                <Label htmlFor="a-notes">Notes</Label>
+                <Input id="a-notes" placeholder="Optional notes" value={notes} onChange={(e) => setNotes(e.target.value)} />
+              </div>
+            </div>
+            <div className="mt-4">
+              <Button onClick={submit} disabled={submitting || !selectedPatient}>{submitting ? "Scheduling..." : "Schedule"}</Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+      ) : (
+      <div>
+        <Card>
+          <CardHeader>
+            <CardTitle>Book New Appointment {selectedPatient ? `for ${selectedPatient.name} (#${selectedPatient.id})` : ''}</CardTitle>
+          </CardHeader>
+          <CardContent>
             <div className="grid grid-cols-1 gap-4">
               <div>
                 <Label htmlFor="a-date">Date</Label>

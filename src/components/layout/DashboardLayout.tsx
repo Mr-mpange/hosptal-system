@@ -19,7 +19,7 @@ import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
 
 interface DashboardLayoutProps {
-  userRole: "patient" | "doctor" | "admin";
+  userRole: "patient" | "doctor" | "admin" | "manager";
   userName: string;
   userEmail: string;
   children: React.ReactNode;
@@ -32,11 +32,14 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
 
   const getMenuItems = () => {
     // Role-specific dashboard path
-    const dashboardPath = userRole === 'patient'
-      ? '/dashboard/patient'
-      : userRole === 'doctor'
-      ? '/dashboard/doctor'
-      : '/dashboard/admin';
+    const dashboardPath =
+      userRole === 'patient'
+        ? '/dashboard/patient'
+        : userRole === 'doctor'
+        ? '/dashboard/doctor'
+        : userRole === 'manager'
+        ? '/dashboard/manager'
+        : '/dashboard/admin';
 
     // Base items shown to all roles
     const base = [
@@ -53,6 +56,10 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
     if (userRole === 'admin') {
       base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
       base.push({ icon: Users, label: "Users", path: "/users" });
+      base.push({ icon: Settings, label: "Settings", path: "/settings" });
+    }
+    if (userRole === 'manager') {
+      base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
       base.push({ icon: Settings, label: "Settings", path: "/settings" });
     }
     return base;

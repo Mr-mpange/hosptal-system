@@ -12,7 +12,7 @@ interface LoginFormProps {
   onLogin: (
     email: string,
     password: string,
-    role: "patient" | "doctor" | "admin",
+    role: "patient" | "doctor" | "admin" | "manager",
     nameFromServer?: string,
     idFromServer?: number
   ) => void;
@@ -50,7 +50,7 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
       const token = data?.token as string | undefined;
       const u = data?.user || {};
       const rawRole = String(u?.role ?? "patient").toLowerCase();
-      const serverRole = (rawRole === "patient" || rawRole === "doctor" || rawRole === "admin") ? rawRole : "patient";
+      const serverRole = (rawRole === "patient" || rawRole === "doctor" || rawRole === "admin" || rawRole === "manager") ? (rawRole as "patient"|"doctor"|"admin"|"manager") : "patient";
       // Persist token for subsequent API calls
       try { if (token) localStorage.setItem("auth_token", token); } catch {}
       onLogin(u?.email || email, password, serverRole, u?.name || email, u?.id);
@@ -87,7 +87,7 @@ const LoginForm = ({ onLogin }: LoginFormProps) => {
               {/* Note: Role is determined by your account on the server */}
               <Alert>
                 <AlertDescription className="text-xs">
-                  Your dashboard is determined by your account role on the server (patient/doctor/admin). No role selection needed here.
+                  Your dashboard is determined by your account role on the server (patient/doctor/admin/manager). No role selection needed here.
                 </AlertDescription>
               </Alert>
 

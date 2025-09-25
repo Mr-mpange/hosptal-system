@@ -9,6 +9,7 @@ import Register from "./pages/Register";
 import PatientDashboard from "@/components/dashboard/PatientDashboard";
 import DoctorDashboard from "@/components/dashboard/DoctorDashboard";
 import AdminDashboard from "@/components/dashboard/AdminDashboard";
+import ManagerDashboard from "@/components/dashboard/ManagerDashboard";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import Appointments from "./pages/Appointments";
 import Patients from "./pages/Patients";
@@ -19,7 +20,7 @@ import { useNavigate } from "react-router-dom";
 
 const queryClient = new QueryClient();
 
-type Role = "patient" | "doctor" | "admin";
+type Role = "patient" | "doctor" | "admin" | "manager";
 
 const getAuthUser = (): { email: string; name: string; role: Role } | null => {
   try {
@@ -28,7 +29,7 @@ const getAuthUser = (): { email: string; name: string; role: Role } | null => {
     const parsed = JSON.parse(raw);
     if (parsed?.email && parsed?.role && parsed?.name) {
       const r = String(parsed.role).toLowerCase();
-      const role: Role = (r === "patient" || r === "doctor" || r === "admin") ? r : "patient";
+      const role: Role = (r === "patient" || r === "doctor" || r === "admin" || r === "manager") ? (r as Role) : "patient";
       return { email: parsed.email, name: parsed.name, role } as any;
     }
   } catch {}
@@ -40,7 +41,14 @@ const ProtectedRoute = ({ children, allowed }: { children: JSX.Element; allowed?
   if (!user) return <Navigate to="/" replace />;
   if (allowed && !allowed.includes(user.role)) {
     // Send user back to their own dashboard
-    const redirect = user.role === "patient" ? "/dashboard/patient" : user.role === "doctor" ? "/dashboard/doctor" : "/dashboard/admin";
+    const redirect =
+      user.role === "patient"
+        ? "/dashboard/patient"
+        : user.role === "doctor"
+        ? "/dashboard/doctor"
+        : user.role === "manager"
+        ? "/dashboard/manager"
+        : "/dashboard/admin";
     return <Navigate to={redirect} replace />;
   }
   return children;
@@ -82,6 +90,22 @@ const App = () => (
                   return (
                     <DashboardLayout userRole={u?.role || "doctor"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
                       <DoctorDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/dashboard/manager"
+            element={
+              <ProtectedRoute allowed={["manager"]}>
+                {(() => {
+                  const u = getAuthUser();
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u?.role || "manager"} userName={u?.name || ""} userEmail={u?.email || ""} onLogout={onLogout}>
+                      <ManagerDashboard />
                     </DashboardLayout>
                   );
                 })()}
