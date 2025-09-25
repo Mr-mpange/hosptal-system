@@ -12,10 +12,12 @@ const express = require("express");
 const cors = require("cors");
 const { pool } = require("./mysql.cjs");
 const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
 require("dotenv").config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
 
 app.use(cors());
 app.use(express.json());
@@ -24,6 +26,253 @@ app.use((req, _res, next) => {
   console.log(`[api] ${req.method} ${req.url}`);
   next();
 });
+
+// Occupancy metrics (beds by department)
+app.get('/api/metrics/occupancy', requireAuth, async (req, res) => {
+  try {
+    const totals = await q("SELECT COUNT(*) totalBeds, SUM(CASE WHEN status='occupied' THEN 1 ELSE 0 END) occupiedBeds FROM beds");
+    const t = totals[0] || { totalBeds: 0, occupiedBeds: 0 };
+    const details = await q(`SELECT d.name AS department, COUNT(b.id) AS total, SUM(CASE WHEN b.status='occupied' THEN 1 ELSE 0 END) AS occupied
+      FROM departments d
+      LEFT JOIN wards w ON w.department_id = d.id
+      LEFT JOIN beds b ON b.ward_id = w.id
+      GROUP BY d.id, d.name
+      ORDER BY d.name ASC`);
+    const byDepartment = details.map(r => ({ department: r.department, total: Number(r.total||0), occupied: Number(r.occupied||0), free: Math.max(Number(r.total||0) - Number(r.occupied||0), 0) }));
+    const freeBeds = Math.max(Number(t.totalBeds||0) - Number(t.occupiedBeds||0), 0);
+    res.json({ totalBeds: Number(t.totalBeds||0), occupiedBeds: Number(t.occupiedBeds||0), freeBeds, byDepartment });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Simple query helper
+async function q(sql, params = []) {
+  const [rows] = await pool.query(sql, params);
+  return rows;
+}
+
+// Minimal bootstrap of required tables for development/demo
+async function ensureTables() {
+  await q(`CREATE TABLE IF NOT EXISTS users (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(120) NOT NULL,
+    email VARCHAR(160) NOT NULL UNIQUE,
+    password_hash VARCHAR(255) NOT NULL,
+    role ENUM('patient','doctor','admin','laboratorist','manager') NOT NULL DEFAULT 'patient',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS notifications (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    title VARCHAR(160) NOT NULL,
+    message VARCHAR(1000) NOT NULL,
+    target_role ENUM('all','patient','doctor','admin','laboratorist','manager') NOT NULL DEFAULT 'all',
+    created_by INT UNSIGNED NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(target_role), INDEX(created_at)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS patients (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NULL,
+    name VARCHAR(120) NOT NULL,
+    email VARCHAR(160) NULL,
+    phone VARCHAR(40) NULL,
+    notes VARCHAR(255) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX (user_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS appointments (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    doctor_id INT UNSIGNED NULL,
+    date DATE NOT NULL,
+    time VARCHAR(8) NOT NULL,
+    notes VARCHAR(255) NULL,
+    status ENUM('requested','approved','rejected','rescheduled','cancelled','completed') NOT NULL DEFAULT 'requested',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX (patient_id), INDEX (doctor_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS invoices (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    date DATE NOT NULL,
+    status ENUM('pending','paid','void') NOT NULL DEFAULT 'pending',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX (patient_id), INDEX(status)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS payments (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    invoice_id INT UNSIGNED NULL,
+    patient_id INT UNSIGNED NULL,
+    amount DECIMAL(10,2) NOT NULL,
+    method VARCHAR(40) NULL,
+    status ENUM('initiated','success','failed') NOT NULL DEFAULT 'initiated',
+    reference VARCHAR(160) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(invoice_id), INDEX(patient_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS availability (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    doctor_user_id INT UNSIGNED NOT NULL,
+    date DATE NOT NULL,
+    start_time VARCHAR(8) NULL,
+    end_time VARCHAR(8) NULL,
+    status ENUM('on','off') NOT NULL DEFAULT 'on',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(doctor_user_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS branches (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(160) NOT NULL UNIQUE,
+    address VARCHAR(255) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS services (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(160) NOT NULL,
+    price DECIMAL(10,2) NOT NULL DEFAULT 0,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS templates (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    type ENUM('sms','email') NOT NULL,
+    key VARCHAR(120) NOT NULL UNIQUE,
+    subject VARCHAR(200) NULL,
+    body TEXT NOT NULL,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS medical_records (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    record_type VARCHAR(80) NOT NULL,
+    notes TEXT NULL,
+    date DATE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(patient_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS lab_results (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    test_type VARCHAR(120) NOT NULL,
+    value VARCHAR(120) NULL,
+    unit VARCHAR(40) NULL,
+    normal_range VARCHAR(80) NULL,
+    flag ENUM('normal','abnormal','critical') NOT NULL DEFAULT 'normal',
+    date DATE NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(patient_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS prescriptions (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    doctor_id INT UNSIGNED NOT NULL,
+    date DATE NOT NULL DEFAULT (CURRENT_DATE),
+    diagnosis VARCHAR(255) NULL,
+    medications TEXT NULL,
+    notes TEXT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(patient_id), INDEX(doctor_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS lab_orders (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    patient_id INT UNSIGNED NOT NULL,
+    doctor_id INT UNSIGNED NOT NULL,
+    tests TEXT NULL,
+    status ENUM('requested','in_progress','completed','cancelled') NOT NULL DEFAULT 'requested',
+    requested_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    completed_at DATETIME NULL,
+    notes TEXT NULL,
+    INDEX(patient_id), INDEX(doctor_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS audit_logs (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NULL,
+    action VARCHAR(80) NOT NULL,
+    entity VARCHAR(80) NOT NULL,
+    entity_id INT UNSIGNED NULL,
+    meta TEXT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(user_id), INDEX(entity), INDEX(created_at)
+  ) ENGINE=InnoDB`);
+
+  // Manager resources
+  await q(`CREATE TABLE IF NOT EXISTS departments (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(160) NOT NULL UNIQUE,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS wards (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    department_id INT UNSIGNED NOT NULL,
+    name VARCHAR(160) NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(department_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS beds (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    ward_id INT UNSIGNED NOT NULL,
+    label VARCHAR(40) NOT NULL,
+    status ENUM('available','occupied','maintenance') NOT NULL DEFAULT 'available',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(ward_id), INDEX(status)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS inventory_items (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    name VARCHAR(160) NOT NULL,
+    sku VARCHAR(80) NULL,
+    quantity INT NOT NULL DEFAULT 0,
+    reorder_threshold INT NOT NULL DEFAULT 0,
+    unit VARCHAR(40) NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS staff (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    user_id INT UNSIGNED NULL,
+    name VARCHAR(160) NOT NULL,
+    role ENUM('doctor','nurse','support','admin','manager','laboratorist') NOT NULL,
+    department_id INT UNSIGNED NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    INDEX(department_id)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS shifts (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    staff_id INT UNSIGNED NOT NULL,
+    date DATE NOT NULL,
+    start_time VARCHAR(8) NOT NULL,
+    end_time VARCHAR(8) NOT NULL,
+    status ENUM('scheduled','completed','missed') NOT NULL DEFAULT 'scheduled',
+    INDEX(staff_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+
+  await q(`CREATE TABLE IF NOT EXISTS attendance (
+    id INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+    staff_id INT UNSIGNED NOT NULL,
+    date DATE NOT NULL,
+    clock_in VARCHAR(8) NULL,
+    clock_out VARCHAR(8) NULL,
+    status ENUM('present','absent','leave') NOT NULL DEFAULT 'present',
+    INDEX(staff_id), INDEX(date)
+  ) ENGINE=InnoDB`);
+}
 
 // Map common MySQL errors to friendly messages
 const toDbMessage = (err) => {
@@ -48,6 +297,35 @@ const requireAdmin = (req, res, next) => {
   next();
 };
 
+// JWT auth middleware and RBAC
+const requireAuth = (req, res, next) => {
+  try {
+    const auth = req.headers["authorization"] || req.headers["Authorization"];
+    if (!auth || !auth.startsWith("Bearer ")) return res.status(401).json({ message: "Missing token" });
+    const token = auth.slice(7);
+    const payload = jwt.verify(token, JWT_SECRET);
+    req.user = payload; // { id, name, email, role }
+    next();
+  } catch (e) {
+    return res.status(401).json({ message: "Invalid token" });
+  }
+};
+
+const requireRole = (roles = []) => (req, res, next) => {
+  const role = String(req.user?.role || '').toLowerCase();
+  if (!roles.includes(role)) return res.status(403).json({ message: 'Forbidden' });
+  next();
+};
+
+// Audit helper
+async function audit(userId, action, entity, entityId = null, meta = null) {
+  try {
+    await q("INSERT INTO audit_logs (user_id, action, entity, entity_id, meta) VALUES (?,?,?,?,?)", [userId || null, action, entity, entityId, meta ? JSON.stringify(meta) : null]);
+  } catch (e) {
+    console.warn('[audit] failed:', e?.message || e);
+  }
+}
+
 // Health check
 app.get("/api/health", async (req, res) => {
   let db = "unknown";
@@ -61,6 +339,32 @@ app.get("/api/health", async (req, res) => {
     db_error = err?.message || String(err);
   }
   res.json({ status: "ok", db, db_error });
+});
+
+// Initialize minimal schema (dev/demo)
+ensureTables().then(()=>console.log('[db] ensureTables done')).catch(e=>console.error('[db] ensureTables error', e));
+
+// Auth endpoints
+app.post('/api/login', async (req, res) => {
+  try {
+    const { email, password } = req.body || {};
+    if (!email || !password) return res.status(400).json({ message: 'Missing credentials' });
+    const rows = await q("SELECT id, name, email, password_hash, role FROM users WHERE email = ? LIMIT 1", [email]);
+    if (!rows.length) return res.status(401).json({ message: 'Invalid email or password' });
+    const user = rows[0];
+    const ok = await bcrypt.compare(password, user.password_hash);
+    if (!ok) return res.status(401).json({ message: 'Invalid email or password' });
+    const token = jwt.sign({ id: user.id, name: user.name, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (e) { res.status(500).json({ message: 'Login failed' }); }
+});
+
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const rows = await q("SELECT id, name, email, role FROM users WHERE id = ?", [req.user.id]);
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ message: 'Failed to load profile' }); }
 });
 
 // Admin: create user with role (protected by ADMIN_API_SECRET)
@@ -118,7 +422,11 @@ app.post("/api/register", async (req, res) => {
       "INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)",
       [name, email, hash, userRole]
     );
-
+    // Auto-create a patient profile for patient role
+    if (userRole === 'patient') {
+      await q("INSERT INTO patients (user_id, name, email) VALUES (?,?,?)", [result.insertId, name, email]);
+    }
+    await audit(null, 'register', 'user', result.insertId, { email, role: userRole });
     return res.status(201).json({ id: result.insertId, name, email, role: userRole });
   } catch (err) {
     console.error("/api/register error:", err);
@@ -140,6 +448,442 @@ app.get("/api/users", async (req, res) => {
     console.error("/api/users error:", err);
     res.status(500).json({ message: "Database error", details: err.message });
   }
+});
+
+// Doctors and Patients
+app.get('/api/doctors', requireAuth, async (req, res) => {
+  try { const rows = await q("SELECT id, name, email FROM users WHERE role = 'doctor' ORDER BY name ASC"); res.json(rows); }
+  catch { res.status(500).json({ message: 'Failed to load doctors' }); }
+});
+
+app.get('/api/patients', requireAuth, async (req, res) => {
+  try { const rows = await q("SELECT * FROM patients ORDER BY id DESC LIMIT 200"); res.json(rows); }
+  catch { res.status(500).json({ message: 'Failed to load patients' }); }
+});
+
+app.get('/api/patients/simple', requireAuth, async (req, res) => {
+  try { const rows = await q("SELECT id, name, email FROM patients ORDER BY name ASC"); res.json(rows); }
+  catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.get('/api/patients/by-user/:userId', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.params.userId);
+    const ps = await q("SELECT * FROM patients WHERE user_id = ? LIMIT 1", [userId]);
+    if (ps.length) return res.json(ps[0]);
+    const us = await q("SELECT id, name, email FROM users WHERE id = ?", [userId]);
+    if (!us.length) return res.status(404).json({ message: 'User not found' });
+    const u = us[0];
+    const r = await q("INSERT INTO patients (user_id, name, email) VALUES (?,?,?)", [u.id, u.name, u.email]);
+    const created = await q("SELECT * FROM patients WHERE id = ?", [r.insertId]);
+    res.json(created[0]);
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Invoices
+app.get('/api/invoices', requireAuth, async (req, res) => {
+  try {
+    const { patient_id } = req.query;
+    let rows;
+    if (patient_id) rows = await q("SELECT * FROM invoices WHERE patient_id = ? ORDER BY id DESC", [Number(patient_id)]);
+    else rows = await q("SELECT * FROM invoices ORDER BY id DESC LIMIT 200");
+    rows = rows.map(r => ({ ...r, amount: String(r.amount) }));
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed to load invoices' }); }
+});
+
+app.get('/api/invoices/meta', requireAuth, (req, res) => { res.json({ statuses: ['pending','paid','void'] }); });
+
+app.post('/api/invoices', requireAuth, requireRole(['admin','manager','doctor']), async (req, res) => {
+  try {
+    const { patient_id, amount, date, status } = req.body || {};
+    if (!patient_id || !amount || !date) return res.status(400).json({ message: 'Missing fields' });
+    const st = ['pending','paid','void'].includes(String(status)) ? String(status) : 'pending';
+    const r = await q("INSERT INTO invoices (patient_id, amount, date, status) VALUES (?,?,?,?)", [Number(patient_id), Number(amount), date, st]);
+    await audit(req.user.id, 'create', 'invoice', r.insertId, { patient_id, amount, date, status: st });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Create invoice failed' }); }
+});
+
+app.post('/api/invoices/:id/pay', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const invs = await q("SELECT * FROM invoices WHERE id = ?", [id]);
+    if (!invs.length) return res.status(404).json({ message: 'Invoice not found' });
+    const inv = invs[0];
+    await q("UPDATE invoices SET status='paid' WHERE id = ?", [id]);
+    await q("INSERT INTO payments (invoice_id, patient_id, amount, method, status, reference) VALUES (?,?,?,?,?,?)",
+      [id, inv.patient_id, inv.amount, (req.body?.method||'mock'), 'success', `INV${id}-${Date.now()}`]);
+    await audit(req.user.id, 'pay', 'invoice', id, { method: req.body?.method||'mock' });
+    res.json({ ok: true });
+  } catch { res.status(500).json({ message: 'Payment failed' }); }
+});
+
+app.get('/api/invoices/:id/download', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const rows = await q("SELECT i.*, p.name AS patient_name FROM invoices i LEFT JOIN patients p ON p.id = i.patient_id WHERE i.id = ?", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    const inv = rows[0];
+    const content = `Invoice #${inv.id}\nPatient: ${inv.patient_name || inv.patient_id}\nAmount: ${inv.amount}\nDate: ${inv.date}\nStatus: ${inv.status}\nGenerated: ${new Date().toISOString()}\n`;
+    res.setHeader('Content-Type', 'text/plain');
+    res.setHeader('Content-Disposition', `attachment; filename="invoice_${id}.txt"`);
+    res.send(content);
+  } catch { res.status(500).json({ message: 'Download failed' }); }
+});
+
+// Availability helpers
+async function isWithinAvailability(doctorUserId, date, timeStr) {
+  try {
+    const avs = await q("SELECT * FROM availability WHERE doctor_user_id = ? AND date = ? AND status='on'", [doctorUserId, date]);
+    if (!avs.length) return false;
+    const t = timeStr;
+    return avs.some(a => (!a.start_time || t >= a.start_time) && (!a.end_time || t <= a.end_time));
+  } catch { return true; }
+}
+
+async function hasConflict(doctorUserId, date, timeStr) {
+  const rows = await q("SELECT id FROM appointments WHERE doctor_id = ? AND date = ? AND time = ? LIMIT 1", [doctorUserId, date, timeStr]);
+  return rows.length > 0;
+}
+
+// Appointments
+app.get('/api/appointments', requireAuth, async (req, res) => {
+  try {
+    const { patient_id } = req.query;
+    let rows;
+    if (patient_id) rows = await q("SELECT * FROM appointments WHERE patient_id = ? ORDER BY date DESC, time DESC", [Number(patient_id)]);
+    else rows = await q("SELECT * FROM appointments ORDER BY date DESC, time DESC LIMIT 200");
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed to load appointments' }); }
+});
+
+app.get('/api/appointments/range', requireAuth, async (req, res) => {
+  try {
+    const { from, to, doctor_id } = req.query;
+    const params = [];
+    let sql = "SELECT * FROM appointments WHERE 1=1";
+    if (from) { sql += " AND date >= ?"; params.push(from); }
+    if (to) { sql += " AND date <= ?"; params.push(to); }
+    if (doctor_id) { sql += " AND doctor_id = ?"; params.push(Number(doctor_id)); }
+    sql += " ORDER BY date ASC, time ASC";
+    const rows = await q(sql, params);
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/appointments', requireAuth, async (req, res) => {
+  try {
+    const role = String(req.user.role || '').toLowerCase();
+    const uid = req.user.id;
+    const { patient_id, doctor_id, date, time, notes } = req.body || {};
+    const pId = patient_id ? Number(patient_id) : null;
+    let dId = doctor_id ? Number(doctor_id) : null;
+    if (!date || !time) return res.status(400).json({ message: 'Missing date/time' });
+    let finalPatientId = pId;
+    if (role === 'patient' && !finalPatientId) {
+      const p = await q("SELECT id FROM patients WHERE user_id = ? LIMIT 1", [uid]);
+      if (!p.length) return res.status(400).json({ message: 'Patient profile not found' });
+      finalPatientId = p[0].id;
+    }
+    if (!finalPatientId) return res.status(400).json({ message: 'Missing patient_id' });
+    if (dId) {
+      if (await hasConflict(dId, date, time)) return res.status(409).json({ message: 'Selected time conflicts with existing appointment' });
+      const ok = await isWithinAvailability(dId, date, time);
+      if (!ok) return res.status(409).json({ message: 'Doctor is not available at the selected time' });
+    }
+    const r = await q("INSERT INTO appointments (patient_id, doctor_id, date, time, notes) VALUES (?,?,?,?,?)", [finalPatientId, dId, date, time, notes || null]);
+    await audit(req.user.id, 'create', 'appointment', r.insertId, { patient_id: finalPatientId, doctor_id: dId, date, time });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Create failed' }); }
+});
+
+// Appointment status transitions (doctor/admin)
+app.post('/api/appointments/:id/approve', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const rows = await q("SELECT * FROM appointments WHERE id = ?", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    const a = rows[0];
+    if (a.doctor_id) {
+      if (await hasConflict(a.doctor_id, a.date, a.time)) return res.status(409).json({ message: 'Conflict at this time' });
+      const ok = await isWithinAvailability(a.doctor_id, a.date, a.time);
+      if (!ok) return res.status(409).json({ message: 'Not within doctor availability' });
+    }
+    await q("UPDATE appointments SET status='approved' WHERE id = ?", [id]);
+    await audit(req.user.id, 'approve', 'appointment', id);
+    await q("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Approved', `Your appointment #${id} has been approved.`, 'patient', req.user.id]);
+    res.json({ ok: true });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/appointments/:id/reject', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const rows = await q("SELECT id FROM appointments WHERE id = ?", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    await q("UPDATE appointments SET status='rejected' WHERE id = ?", [id]);
+    await audit(req.user.id, 'reject', 'appointment', id);
+    await q("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Rejected', `Your appointment #${id} was rejected.`, 'patient', req.user.id]);
+    res.json({ ok: true });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/appointments/:id/reschedule', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { date, time } = req.body || {};
+    if (!date || !time) return res.status(400).json({ message: 'Missing date/time' });
+    const rows = await q("SELECT * FROM appointments WHERE id = ?", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    const a = rows[0];
+    if (a.doctor_id) {
+      if (await hasConflict(a.doctor_id, date, time)) return res.status(409).json({ message: 'Conflict at selected time' });
+      const ok = await isWithinAvailability(a.doctor_id, date, time);
+      if (!ok) return res.status(409).json({ message: 'Not within doctor availability' });
+    }
+    await q("UPDATE appointments SET date=?, time=?, status='rescheduled' WHERE id = ?", [date, time, id]);
+    await audit(req.user.id, 'reschedule', 'appointment', id, { date, time });
+    await q("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Rescheduled', `Your appointment #${id} has been rescheduled to ${date} ${time}.`, 'patient', req.user.id]);
+    res.json({ ok: true });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Available slots suggestion for a doctor and date (15-min grid)
+app.get('/api/appointments/available', requireAuth, async (req, res) => {
+  try {
+    const doctor_id = Number(req.query.doctor_id);
+    const date = String(req.query.date || '');
+    if (!doctor_id || !date) return res.status(400).json({ message: 'doctor_id and date required' });
+    const avs = await q("SELECT * FROM availability WHERE doctor_user_id = ? AND date = ? AND status='on'", [doctor_id, date]);
+    if (!avs.length) return res.json([]);
+    const takenRows = await q("SELECT time FROM appointments WHERE doctor_id = ? AND date = ?", [doctor_id, date]);
+    const taken = new Set(takenRows.map(r=>r.time));
+    const slots = [];
+    for (const a of avs) {
+      const start = a.start_time || '09:00';
+      const end = a.end_time || '17:00';
+      let [h, m] = start.split(':').map(Number);
+      while (true) {
+        const t = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        if (t > end) break;
+        if (!taken.has(t)) slots.push(t);
+        m += 15; if (m >= 60) { m = 0; h += 1; }
+        if (h > 23) break;
+      }
+    }
+    res.json([...new Set(slots)].sort());
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Availability CRUD (doctor)
+app.get('/api/availability', requireAuth, async (req, res) => {
+  try {
+    const { from, to } = req.query;
+    const params = [];
+    let sql = "SELECT * FROM availability WHERE 1=1";
+    if (from) { sql += " AND date >= ?"; params.push(from); }
+    if (to) { sql += " AND date <= ?"; params.push(to); }
+    sql += " ORDER BY date ASC";
+    const rows = await q(sql, params);
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/availability', requireAuth, requireRole(['doctor','admin','manager']), async (req, res) => {
+  try {
+    const doctor_user_id = req.user.id;
+    const { date, start_time, end_time, status } = req.body || {};
+    if (!date) return res.status(400).json({ message: 'Missing date' });
+    const st = ['on','off'].includes(String(status)) ? String(status) : 'on';
+    const r = await q("INSERT INTO availability (doctor_user_id, date, start_time, end_time, status) VALUES (?,?,?,?,?)", [doctor_user_id, date, start_time || null, end_time || null, st]);
+    await audit(req.user.id, 'create', 'availability', r.insertId, { date, start_time, end_time, status: st });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Metrics
+app.get('/api/metrics/finance', requireAuth, async (req, res) => {
+  try {
+    const totals = await q("SELECT COUNT(*) as count, SUM(amount) as total, SUM(CASE WHEN status='pending' THEN amount ELSE 0 END) as pending, SUM(CASE WHEN status='paid' THEN amount ELSE 0 END) as paid, SUM(CASE WHEN date = CURRENT_DATE THEN amount ELSE 0 END) as todayTotal FROM invoices");
+    const t = totals[0] || { count:0,total:0,pending:0,paid:0,todayTotal:0 };
+    res.json({ count: Number(t.count||0), total: Number(t.total||0), pending: Number(t.pending||0), paid: Number(t.paid||0), todayTotal: Number(t.todayTotal||0) });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.get('/api/metrics/doctor', requireAuth, async (req, res) => {
+  try {
+    const doctorId = Number(req.query.doctor_id || req.user.id);
+    const today = new Date().toISOString().slice(0,10);
+    const [aToday] = await q("SELECT COUNT(*) c FROM appointments WHERE doctor_id = ? AND date = ?", [doctorId, today]);
+    const [patients] = await q("SELECT COUNT(DISTINCT patient_id) c FROM appointments WHERE doctor_id = ?", [doctorId]);
+    const [records] = await q("SELECT COUNT(*) c FROM medical_records");
+    const [inv] = await q("SELECT COUNT(*) c FROM invoices WHERE date = CURRENT_DATE");
+    const common = await q("SELECT record_type, COUNT(*) c FROM medical_records GROUP BY record_type ORDER BY c DESC LIMIT 5");
+    res.json({ doctorId, appointmentsToday: Number(aToday?.c||0), patientsCount: Number(patients?.c||0), recordsCount: Number(records?.c||0), invoicesToday: Number(inv?.c||0), commonRecordTypes: common });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.get('/api/metrics/labs/abnormal', requireAuth, async (req, res) => {
+  try { const [row] = await q("SELECT COUNT(*) c FROM lab_results WHERE flag IN ('abnormal','critical') AND date >= DATE_SUB(CURRENT_DATE, INTERVAL 30 DAY)"); res.json({ abnormal: Number(row?.c||0) }); }
+  catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Branches/Services/Templates CRUD
+app.get('/api/branches', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM branches ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/branches', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const r = await q("INSERT INTO branches (name, address) VALUES (?,?)", [req.body?.name, req.body?.address||null]); await audit(req.user.id, 'create', 'branch', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/branches/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM branches WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'branch', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+app.get('/api/services', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM services ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/services', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const r = await q("INSERT INTO services (name, price) VALUES (?,?)", [req.body?.name, Number(req.body?.price)||0]); await audit(req.user.id, 'create', 'service', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/services/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM services WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'service', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+app.get('/api/templates', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM templates ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/templates', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { type, key, subject, body, enabled } = req.body||{}; const r = await q("INSERT INTO templates (type, `key`, subject, body, enabled) VALUES (?,?,?,?,?)", [type, key, subject||null, body, !!enabled]); await audit(req.user.id, 'create', 'template', r.insertId, { type, key }); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/templates/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM templates WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'template', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Prescriptions and Lab Orders (doctor)
+app.post('/api/prescriptions', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const { patient_id, diagnosis, medications, notes } = req.body || {};
+    if (!patient_id) return res.status(400).json({ message: 'Missing patient_id' });
+    const meds = medications ? JSON.stringify(medications) : null;
+    const r = await q("INSERT INTO prescriptions (patient_id, doctor_id, diagnosis, medications, notes, date) VALUES (?,?,?,?,?, CURRENT_DATE)", [Number(patient_id), req.user.id, diagnosis||null, meds, notes||null]);
+    await audit(req.user.id, 'create', 'prescription', r.insertId, { patient_id });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/lab-orders', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const { patient_id, tests, notes } = req.body || {};
+    if (!patient_id) return res.status(400).json({ message: 'Missing patient_id' });
+    const t = Array.isArray(tests) ? JSON.stringify(tests) : null;
+    const r = await q("INSERT INTO lab_orders (patient_id, doctor_id, tests, notes) VALUES (?,?,?,?)", [Number(patient_id), req.user.id, t, notes||null]);
+    await audit(req.user.id, 'create', 'lab_order', r.insertId, { patient_id });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Labs list (for patient dashboard sample)
+app.get('/api/labs', requireAuth, async (req, res) => {
+  try { res.json(await q("SELECT * FROM lab_results ORDER BY date DESC, id DESC LIMIT 50")); }
+  catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Medical Records API
+app.get('/api/records', requireAuth, async (req, res) => {
+  try {
+    const { patient_id } = req.query;
+    let sql = "SELECT * FROM medical_records"; const params = [];
+    if (patient_id) { sql += " WHERE patient_id = ?"; params.push(Number(patient_id)); }
+    sql += " ORDER BY date DESC, id DESC LIMIT 200";
+    res.json(await q(sql, params));
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Manager Resources APIs
+// Departments
+app.get('/api/departments', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM departments ORDER BY name ASC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/departments', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const r = await q("INSERT INTO departments (name) VALUES (?)", [req.body?.name]); await audit(req.user.id, 'create', 'department', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/departments/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM departments WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'department', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Wards
+app.get('/api/wards', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM wards ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/wards', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { department_id, name } = req.body||{}; const r = await q("INSERT INTO wards (department_id, name) VALUES (?,?)", [Number(department_id), name]); await audit(req.user.id, 'create', 'ward', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/wards/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM wards WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'ward', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Beds
+app.get('/api/beds', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM beds ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/beds', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { ward_id, label, status } = req.body||{}; const st = ['available','occupied','maintenance'].includes(String(status)) ? String(status) : 'available'; const r = await q("INSERT INTO beds (ward_id, label, status) VALUES (?,?,?)", [Number(ward_id), label, st]); await audit(req.user.id, 'create', 'bed', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.patch('/api/beds/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { status } = req.body||{}; const st = ['available','occupied','maintenance'].includes(String(status)) ? String(status) : null; if (!st) return res.status(400).json({ message: 'Invalid status' }); await q("UPDATE beds SET status=? WHERE id=?", [st, Number(req.params.id)]); await audit(req.user.id, 'update', 'bed', Number(req.params.id), { status: st }); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/beds/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM beds WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'bed', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Inventory
+app.get('/api/inventory', requireAuth, async (req, res) => {
+  try {
+    const low = String(req.query.low_stock||'').toLowerCase();
+    if (['1','true','yes','on'].includes(low)) {
+      return res.json(await q("SELECT * FROM inventory_items WHERE quantity <= reorder_threshold ORDER BY (reorder_threshold - quantity) DESC, id DESC"));
+    }
+    res.json(await q("SELECT * FROM inventory_items ORDER BY id DESC"));
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+app.post('/api/inventory', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { name, sku, quantity, reorder_threshold, unit } = req.body||{}; const r = await q("INSERT INTO inventory_items (name, sku, quantity, reorder_threshold, unit) VALUES (?,?,?,?,?)", [name, sku||null, Number(quantity)||0, Number(reorder_threshold)||0, unit||null]); await audit(req.user.id, 'create', 'inventory_item', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.patch('/api/inventory/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { quantity } = req.body||{}; if (quantity==null) return res.status(400).json({ message: 'quantity required' }); await q("UPDATE inventory_items SET quantity=? WHERE id=?", [Number(quantity), Number(req.params.id)]); await audit(req.user.id, 'update', 'inventory_item', Number(req.params.id), { quantity: Number(quantity) }); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/inventory/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM inventory_items WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'inventory_item', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Staff & Shifts
+app.get('/api/staff', requireAuth, async (req, res) => { try { res.json(await q("SELECT * FROM staff ORDER BY id DESC")); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/staff', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { user_id, name, role, department_id } = req.body||{}; const r = await q("INSERT INTO staff (user_id, name, role, department_id) VALUES (?,?,?,?)", [user_id||null, name, role, department_id||null]); await audit(req.user.id, 'create', 'staff', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.patch('/api/staff/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { department_id, role } = req.body||{}; const params = []; let sql = 'UPDATE staff SET '; const sets = []; if (department_id!==undefined){ sets.push('department_id=?'); params.push(department_id||null);} if (role){ sets.push('role=?'); params.push(role);} if(!sets.length) return res.status(400).json({ message: 'No changes' }); sql += sets.join(', ')+ ' WHERE id=?'; params.push(Number(req.params.id)); await q(sql, params); await audit(req.user.id, 'update', 'staff', Number(req.params.id), req.body); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+// Support department update path used by ManagerDashboard
+app.put('/api/staff/:id/department', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const depId = ('department_id' in req.body) ? (req.body.department_id || null) : null; await q("UPDATE staff SET department_id=? WHERE id=?", [depId, Number(req.params.id)]); await audit(req.user.id, 'update', 'staff', Number(req.params.id), { department_id: depId }); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/staff/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM staff WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'staff', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+app.get('/api/shifts', requireAuth, async (req, res) => { try { const { date } = req.query; let sql = 'SELECT * FROM shifts'; const params=[]; if (date){ sql += ' WHERE date=?'; params.push(date);} sql += ' ORDER BY date DESC, id DESC'; res.json(await q(sql, params)); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.post('/api/shifts', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { staff_id, date, start_time, end_time, status } = req.body||{}; if (!staff_id || !date || !start_time || !end_time) return res.status(400).json({ message: 'Missing fields' }); const st = ['scheduled','completed','missed'].includes(String(status)) ? String(status) : 'scheduled'; const r = await q("INSERT INTO shifts (staff_id, date, start_time, end_time, status) VALUES (?,?,?,?,?)", [Number(staff_id), date, start_time, end_time, st]); await audit(req.user.id, 'create', 'shift', r.insertId, req.body); res.status(201).json({ id: r.insertId }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.patch('/api/shifts/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { status } = req.body||{}; const st = ['scheduled','completed','missed'].includes(String(status)) ? String(status) : null; if (!st) return res.status(400).json({ message: 'Invalid status' }); await q("UPDATE shifts SET status=? WHERE id=?", [st, Number(req.params.id)]); await audit(req.user.id, 'update', 'shift', Number(req.params.id), { status: st }); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+// Support PUT as used by ManagerDashboard
+app.put('/api/shifts/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { const { status } = req.body||{}; const st = ['scheduled','completed','missed'].includes(String(status)) ? String(status) : null; if (!st) return res.status(400).json({ message: 'Invalid status' }); await q("UPDATE shifts SET status=? WHERE id=?", [st, Number(req.params.id)]); await audit(req.user.id, 'update', 'shift', Number(req.params.id), { status: st }); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+app.delete('/api/shifts/:id', requireAuth, requireRole(['admin','manager']), async (req, res) => { try { await q("DELETE FROM shifts WHERE id = ?", [Number(req.params.id)]); await audit(req.user.id, 'delete', 'shift', Number(req.params.id)); res.json({ ok: true }); } catch { res.status(500).json({ message: 'Failed' }); } });
+
+// Attendance (read-only for now)
+app.get('/api/attendance', requireAuth, async (req, res) => {
+  try {
+    const { from, to, staff_id, date } = req.query;
+    let sql = 'SELECT * FROM attendance WHERE 1=1';
+    const params=[];
+    if (date) { sql += ' AND date = ?'; params.push(date); }
+    if (from) { sql += ' AND date>=?'; params.push(from); }
+    if (to) { sql += ' AND date<=?'; params.push(to); }
+    if (staff_id) { sql += ' AND staff_id=?'; params.push(Number(staff_id)); }
+    sql += ' ORDER BY date DESC, id DESC';
+    res.json(await q(sql, params));
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/records', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const { patient_id, record_type, notes, date } = req.body || {};
+    if (!patient_id || !record_type || !date) return res.status(400).json({ message: 'Missing fields' });
+    const r = await q("INSERT INTO medical_records (patient_id, record_type, notes, date) VALUES (?,?,?,?)", [Number(patient_id), record_type, notes||null, date]);
+    await audit(req.user.id, 'create', 'medical_record', r.insertId, { patient_id, record_type });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Notifications API (basic, role-based)
+app.get('/api/notifications', requireAuth, async (req, res) => {
+  try {
+    const role = String(req.user.role || 'all');
+    const rows = await q("SELECT * FROM notifications WHERE target_role IN ('all', ?) ORDER BY id DESC LIMIT 100", [role]);
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+app.post('/api/notifications', requireAuth, requireRole(['admin','manager','doctor']), async (req, res) => {
+  try {
+    const { title, message, target_role } = req.body || {};
+    if (!title || !message) return res.status(400).json({ message: 'Missing fields' });
+    const target = ['all','patient','doctor','admin','laboratorist','manager'].includes(String(target_role)) ? String(target_role) : 'all';
+    const r = await q("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", [title, message, target, req.user.id]);
+    await audit(req.user.id, 'create', 'notification', r.insertId, { target_role: target });
+    res.status(201).json({ id: r.insertId });
+  } catch { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Audit log list with optional filters
+app.get('/api/audit', requireAuth, requireRole(['admin']), async (req, res) => {
+  try {
+    const { from, to, user_id } = req.query;
+    let sql = "SELECT * FROM audit_logs WHERE 1=1"; const params = [];
+    if (from) { sql += " AND created_at >= ?"; params.push(from + ' 00:00:00'); }
+    if (to) { sql += " AND created_at <= ?"; params.push(to + ' 23:59:59'); }
+    if (user_id) { sql += " AND user_id = ?"; params.push(Number(user_id)); }
+    sql += " ORDER BY id DESC LIMIT 200";
+    res.json(await q(sql, params));
+  } catch { res.status(500).json({ message: 'Failed' }); }
 });
 
 // API 404 handler

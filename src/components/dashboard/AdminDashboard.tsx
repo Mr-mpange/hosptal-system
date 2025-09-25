@@ -1,3 +1,4 @@
+import NotificationsBell from "@/components/NotificationsBell";
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Users, Calendar, DollarSign, TrendingUp, Activity, AlertTriangle, BarChart3, Settings } from "lucide-react";
@@ -5,6 +6,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 const AdminDashboard = () => {
   const [users, setUsers] = useState<Array<{id:number; name:string; email:string; role:string;}>>([]);
@@ -16,6 +20,16 @@ const AdminDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
+  const [audit, setAudit] = useState<Array<{id:number; user_id:number|null; action:string; entity:string; entity_id:number|null; created_at:string; meta?:string|null;}>>([]);
+  const [auditFrom, setAuditFrom] = useState<string>("");
+  const [auditTo, setAuditTo] = useState<string>("");
+  const [auditUserId, setAuditUserId] = useState<string>("");
+  const [branches, setBranches] = useState<Array<{id:number; name:string; address?:string|null}>>([]);
+  const [services, setServices] = useState<Array<{id:number; name:string; price:number}>>([]);
+  const [templates, setTemplates] = useState<Array<{id:number; type:'sms'|'email'; key:string; subject?:string|null; body:string; enabled:boolean}>>([]);
+  const [newBranch, setNewBranch] = useState<{name:string; address:string}>({ name: "", address: "" });
+  const [newService, setNewService] = useState<{name:string; price:string}>({ name: "", price: "0" });
+  const [newTemplate, setNewTemplate] = useState<{type:'sms'|'email'; key:string; subject:string; body:string; enabled:boolean}>({ type:'sms', key:'', subject:'', body:'', enabled:true });
 
   const parseResponse = async (res: Response) => {
     const ct = res.headers.get("content-type") || "";
@@ -36,20 +50,28 @@ const AdminDashboard = () => {
         const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
         const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
         const today = new Date().toISOString().slice(0,10);
-        const [uRes, pRes, aRes, fRes] = await Promise.all([
+        const [uRes, pRes, aRes, fRes, auRes, brRes, svRes, tpRes] = await Promise.all([
           fetch('/api/users', { headers }),
           fetch('/api/patients', { headers }),
           fetch('/api/appointments', { headers }),
           fetch('/api/metrics/finance', { headers }),
+          fetch('/api/audit', { headers }),
+          fetch('/api/branches', { headers }),
+          fetch('/api/services', { headers }),
+          fetch('/api/templates', { headers }),
         ]);
-        const [uData, pData, aData, fData] = await Promise.all([
-          parseResponse(uRes), parseResponse(pRes), parseResponse(aRes), parseResponse(fRes)
+        const [uData, pData, aData, fData, auData, brData, svData, tpData] = await Promise.all([
+          parseResponse(uRes), parseResponse(pRes), parseResponse(aRes), parseResponse(fRes), parseResponse(auRes), parseResponse(brRes), parseResponse(svRes), parseResponse(tpRes)
         ]);
         setUsers(Array.isArray(uData) ? uData : []);
         setPatientsCount(Array.isArray(pData) ? pData.length : null);
         const appts = Array.isArray(aData) ? aData : [];
         setAppointmentsToday(appts.filter((x:any) => String(x.date) === today).length);
         setFinance(fData);
+        setAudit(Array.isArray(auData) ? auData.slice(0,50) : []);
+        setBranches(Array.isArray(brData) ? brData : []);
+        setServices(Array.isArray(svData) ? svData : []);
+        setTemplates(Array.isArray(tpData) ? tpData : []);
       } catch (e:any) {
         setError(e?.message || 'Failed to load admin metrics');
       } finally {
@@ -67,12 +89,240 @@ const AdminDashboard = () => {
           <h1 className="text-3xl font-bold text-foreground">Hospital Overview</h1>
           <p className="text-muted-foreground">Complete system statistics and management</p>
         </div>
-        <Button className="bg-gradient-to-r from-primary to-primary/90" onClick={() => navigate('/settings')}>
-          <Settings className="w-4 h-4 mr-2" />
-          System Settings
-        </Button>
+        <div className="flex items-center gap-2">
+          <NotificationsBell />
+          <Button className="bg-gradient-to-r from-primary to-primary/90" onClick={() => navigate('/settings')}>
+            <Settings className="w-4 h-4 mr-2" />
+            System Settings
+          </Button>
+        </div>
       </div>
 
+      {/* Audit Logs */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <BarChart3 className="w-5 h-5" />
+            Audit Logs
+          </CardTitle>
+          <CardDescription>Recent system actions (admin-only)</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex items-end gap-3 flex-wrap">
+            <div>
+              <label className="text-sm">From</label>
+              <Input type="date" value={auditFrom} onChange={(e)=>setAuditFrom(e.target.value)} />
+            </div>
+            <div>
+              <label className="text-sm">To</label>
+              <Input type="date" value={auditTo} onChange={(e)=>setAuditTo(e.target.value)} />
+            </div>
+            <div>
+              <label className="text-sm">User ID</label>
+              <Input type="number" placeholder="optional" value={auditUserId} onChange={(e)=>setAuditUserId(e.target.value)} />
+            </div>
+            <Button variant="outline" onClick={async ()=>{
+              try {
+                const token = localStorage.getItem('auth_token')||undefined;
+                const headers:any = token ? { Authorization: `Bearer ${token}` } : undefined;
+                const params = new URLSearchParams();
+                if (auditFrom) params.set('from', auditFrom);
+                if (auditTo) params.set('to', auditTo);
+                if (auditUserId) params.set('user_id', auditUserId);
+                const res = await fetch(`/api/audit?${params.toString()}`, { headers });
+                const data = await res.json();
+                setAudit(Array.isArray(data) ? data.slice(0,50) : []);
+              } catch {}
+            }}>Filter</Button>
+          </div>
+          <div className="space-y-2 max-h-64 overflow-auto">
+            {audit.map(log => (
+              <div key={log.id} className="p-3 border rounded flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="font-medium truncate">{log.action}</p>
+                  <p className="text-xs text-muted-foreground truncate">{log.entity} #{log.entity_id ?? ''}</p>
+                </div>
+                <div className="text-xs text-muted-foreground whitespace-nowrap">{new Date(log.created_at).toLocaleString()}</div>
+              </div>
+            ))}
+            {audit.length === 0 && <div className="text-sm text-muted-foreground">No audit entries.</div>}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Settings: Branches */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="w-5 h-5" />
+            Branches
+          </CardTitle>
+          <CardDescription>Manage hospital branches</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <Label htmlFor="br-name">Name</Label>
+              <Input id="br-name" value={newBranch.name} onChange={(e)=>setNewBranch(b=>({...b,name:e.target.value}))} />
+            </div>
+            <div className="md:col-span-2">
+              <Label htmlFor="br-addr">Address</Label>
+              <Input id="br-addr" value={newBranch.address} onChange={(e)=>setNewBranch(b=>({...b,address:e.target.value}))} />
+            </div>
+          </div>
+          <Button onClick={async ()=>{
+            try {
+              const token = localStorage.getItem('auth_token')||undefined;
+              const headers:any = { 'Content-Type': 'application/json' };
+              if (token) headers.Authorization = `Bearer ${token}`;
+              const res = await fetch('/api/branches', { method:'POST', headers, body: JSON.stringify(newBranch) });
+              if(!res.ok){ const t = await res.text(); throw new Error(t); }
+              const list = await fetch('/api/branches', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
+              const data = await list.json(); setBranches(Array.isArray(data) ? data : []);
+              setNewBranch({ name:'', address:'' });
+            } catch (e) { alert('Failed to create branch'); }
+          }}>Add Branch</Button>
+          <div className="space-y-2 max-h-48 overflow-auto">
+            {branches.map(b => (
+              <div key={b.id} className="p-2 border rounded flex items-center justify-between gap-3">
+                <div className="min-w-0"><p className="font-medium truncate">{b.name}</p><p className="text-xs text-muted-foreground truncate">{b.address}</p></div>
+                <Button variant="outline" size="sm" onClick={async ()=>{
+                  if(!confirm('Delete branch?')) return; 
+                  try{
+                    const token = localStorage.getItem('auth_token')||undefined;
+                    const headers:any = token ? { Authorization: `Bearer ${token}` } : undefined;
+                    const res = await fetch(`/api/branches/${b.id}`, { method:'DELETE', headers });
+                    if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                    setBranches(prev=>prev.filter(x=>x.id!==b.id));
+                  }catch{ alert('Failed to delete'); }
+                }}>Delete</Button>
+              </div>
+            ))}
+            {branches.length===0 && <div className="text-sm text-muted-foreground">No branches yet.</div>}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Settings: Services */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="w-5 h-5" />
+            Services
+          </CardTitle>
+          <CardDescription>Manage hospital services</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <Label htmlFor="svc-name">Name</Label>
+              <Input id="svc-name" value={newService.name} onChange={(e)=>setNewService(s=>({...s,name:e.target.value}))} />
+            </div>
+            <div>
+              <Label htmlFor="svc-price">Price</Label>
+              <Input id="svc-price" type="number" value={newService.price} onChange={(e)=>setNewService(s=>({...s,price:e.target.value}))} />
+            </div>
+          </div>
+          <Button onClick={async ()=>{
+            try {
+              const token = localStorage.getItem('auth_token')||undefined;
+              const headers:any = { 'Content-Type': 'application/json' };
+              if (token) headers.Authorization = `Bearer ${token}`;
+              const res = await fetch('/api/services', { method:'POST', headers, body: JSON.stringify({ name:newService.name, price: Number(newService.price)||0 }) });
+              if(!res.ok){ const t = await res.text(); throw new Error(t); }
+              const list = await fetch('/api/services', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
+              const data = await list.json(); setServices(Array.isArray(data) ? data : []);
+              setNewService({ name:'', price:'0' });
+            } catch (e) { alert('Failed to create service'); }
+          }}>Add Service</Button>
+          <div className="space-y-2 max-h-48 overflow-auto">
+            {services.map(s => (
+              <div key={s.id} className="p-2 border rounded flex items-center justify-between gap-3">
+                <div className="min-w-0"><p className="font-medium truncate">{s.name}</p><p className="text-xs text-muted-foreground truncate">{Number(s.price).toLocaleString()}</p></div>
+                <Button variant="outline" size="sm" onClick={async ()=>{
+                  if(!confirm('Delete service?')) return; 
+                  try{
+                    const token = localStorage.getItem('auth_token')||undefined;
+                    const headers:any = token ? { Authorization: `Bearer ${token}` } : undefined;
+                    const res = await fetch(`/api/services/${s.id}`, { method:'DELETE', headers });
+                    if(!res.ok){ const t = await res.text(); throw new Error(t); }
+                    setServices(prev=>prev.filter(x=>x.id!==s.id));
+                  }catch{ alert('Failed to delete'); }
+                }}>Delete</Button>
+              </div>
+            ))}
+            {services.length===0 && <div className="text-sm text-muted-foreground">No services yet.</div>}
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Settings: Templates */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Settings className="w-5 h-5" />
+            Templates
+          </CardTitle>
+          <CardDescription>Manage SMS/Email templates</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <Label htmlFor="tpl-type">Type</Label>
+              <select id="tpl-type" className="w-full border rounded h-10 px-2" value={newTemplate.type} onChange={(e)=>setNewTemplate(t=>({...t, type: e.target.value as 'sms'|'email'}))}>
+                <option value="sms">SMS</option>
+                <option value="email">Email</option>
+              </select>
+            </div>
+            <div>
+              <Label htmlFor="tpl-key">Key</Label>
+              <Input id="tpl-key" value={newTemplate.key} onChange={(e)=>setNewTemplate(t=>({...t,key:e.target.value}))} />
+            </div>
+            <div className="md:col-span-2">
+              <Label htmlFor="tpl-sub">Subject</Label>
+              <Input id="tpl-sub" value={newTemplate.subject} onChange={(e)=>setNewTemplate(t=>({...t,subject:e.target.value}))} />
+            </div>
+            <div className="md:col-span-2">
+              <Label htmlFor="tpl-body">Body</Label>
+              <Textarea id="tpl-body" value={newTemplate.body} onChange={(e)=>setNewTemplate(t=>({...t,body:e.target.value}))} />
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-sm">Enabled</label>
+            <input type="checkbox" checked={newTemplate.enabled} onChange={(e)=>setNewTemplate(t=>({...t,enabled:e.target.checked}))} />
+          </div>
+          <Button onClick={async ()=>{
+            try {
+              const token = localStorage.getItem('auth_token')||undefined;
+              const headers:any = { 'Content-Type': 'application/json' };
+              if (token) headers.Authorization = `Bearer ${token}`;
+              const res = await fetch('/api/templates', { method:'POST', headers, body: JSON.stringify(newTemplate) });
+              if(!res.ok){ const t = await res.text(); throw new Error(t); }
+              const list = await fetch('/api/templates', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
+              const data = await list.json(); setTemplates(Array.isArray(data) ? data : []);
+              setNewTemplate({ type:'sms', key:'', subject:'', body:'', enabled:true });
+            } catch (e) { alert('Failed to create template'); }
+          }}>Add Template</Button>
+          <div className="space-y-2 max-h-48 overflow-auto">
+            {templates.map(t => (
+              <div key={t.id} className="p-2 border rounded flex items-center justify-between gap-3">
+                <div className="min-w-0"><p className="font-medium truncate">[{t.type}] {t.key}</p><p className="text-xs text-muted-foreground truncate">{t.subject || '(no subject)'}</p></div>
+                <Button variant="outline" size="sm" onClick={async ()=>{
+                  if(!confirm('Delete template?')) return; 
+                  try{
+                    const token = localStorage.getItem('auth_token')||undefined;
+                    const headers:any = token ? { Authorization: `Bearer ${token}` } : undefined;
+                    const res = await fetch(`/api/templates/${t.id}`, { method:'DELETE', headers });
+                    if(!res.ok){ const tt = await res.text(); throw new Error(tt); }
+                    setTemplates(prev=>prev.filter(x=>x.id!==t.id));
+                  }catch{ alert('Failed to delete'); }
+                }}>Delete</Button>
+              </div>
+            ))}
+            {templates.length===0 && <div className="text-sm text-muted-foreground">No templates yet.</div>}
+          </div>
+        </CardContent>
+      </Card>
       {/* Key metrics */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <Card>

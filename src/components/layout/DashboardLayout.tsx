@@ -17,6 +17,8 @@ import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { useEffect } from "react";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 interface DashboardLayoutProps {
   userRole: "patient" | "doctor" | "admin" | "manager";
@@ -28,6 +30,9 @@ interface DashboardLayoutProps {
 
 const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: DashboardLayoutProps) => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [notifOpen, setNotifOpen] = useState(false);
+  const [notifications, setNotifications] = useState<Array<{id:number; title:string; message:string; created_at?:string}>>([]);
+  const [unread, setUnread] = useState(0);
   const navigate = useNavigate();
 
   const getMenuItems = () => {
@@ -66,6 +71,26 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
   };
 
   const menuItems = getMenuItems();
+
+  useEffect(() => {
+    // Subscribe to SSE notifications
+    let es: EventSource | null = null;
+    try {
+      const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : undefined;
+      es = new EventSource(`/api/events${token ? `?token=${encodeURIComponent(token)}` : ''}`);
+      es.addEventListener('notification', (e: MessageEvent) => {
+        try {
+          const data = JSON.parse(e.data);
+          setNotifications(prev => {
+            const next = [...prev, { id: data.id, title: data.title, message: data.message, created_at: data.created_at }];
+            return next.slice(-20); // keep last 20
+          });
+          setUnread(u => u + 1);
+        } catch {}
+      });
+    } catch {}
+    return () => { try { es?.close(); } catch {} };
+  }, []);
 
   return (
     <div className="flex h-screen bg-background">
@@ -164,12 +189,36 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
           </div>
 
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="sm" className="relative">
-              <Bell className="w-4 h-4" />
-              <Badge className="absolute -top-1 -right-1 w-5 h-5 p-0 flex items-center justify-center text-xs">
-                3
-              </Badge>
-            </Button>
+            <DropdownMenu open={notifOpen} onOpenChange={setNotifOpen}>
+              <DropdownMenuTrigger asChild>
+                <Button variant="ghost" size="sm" className="relative">
+                  <Bell className="w-4 h-4" />
+                  {unread > 0 && (
+                    <Badge className="absolute -top-1 -right-1 w-5 h-5 p-0 flex items-center justify-center text-xs">
+                      {unread > 9 ? '9+' : unread}
+                    </Badge>
+                  )}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-auto">
+                {notifications.length === 0 && (
+                  <div className="p-3 text-sm text-muted-foreground">No notifications</div>
+                )}
+                {notifications.slice().reverse().map(n => (
+                  <DropdownMenuItem key={n.id} className="whitespace-normal">
+                    <div>
+                      <p className="text-sm font-medium">{n.title}</p>
+                      <p className="text-xs text-muted-foreground">{n.message}</p>
+                    </div>
+                  </DropdownMenuItem>
+                ))}
+                {notifications.length > 0 && (
+                  <div className="p-2">
+                    <Button variant="outline" size="sm" className="w-full" onClick={()=>{ setUnread(0); }}>Mark all as read</Button>
+                  </div>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
             
             <div className="flex items-center gap-2">
               <Avatar className="w-8 h-8">

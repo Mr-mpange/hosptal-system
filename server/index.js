@@ -7,6 +7,109 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
+
+// ===== Appointment available slots (auth) =====
+app.get('/api/appointments/available', requireAuth, async (req, res) => {
+  try {
+    const doctor_id = Number(req.query.doctor_id);
+    const date = String(req.query.date || '');
+    if (!doctor_id || !date) return res.status(400).json({ message: 'doctor_id and date required' });
+    const av = await models.Availability.findAll({ where: { doctor_user_id: doctor_id, date, status: 'on' }, order: [['id','ASC']], limit: 50 });
+    if (!av.length) return res.json([]);
+    const taken = await models.Appointment.findAll({ where: { doctor_id, date }, attributes: ['time'], limit: 500 });
+    const takenSet = new Set(taken.map(t => String(t.time)));
+    const slots = [];
+    for (const a of av) {
+      const start = a.start_time || '09:00';
+      const end = a.end_time || '17:00';
+      let [h, m] = start.split(':').map(Number);
+      while (true) {
+        const t = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+        if (t > end) break;
+        if (!takenSet.has(t)) slots.push(t);
+        m += 15; if (m >= 60) { m = 0; h += 1; }
+        if (h > 23) break;
+      }
+    }
+    res.json([...new Set(slots)].sort());
+  } catch (err) {
+    console.error('/api/appointments/available error:', err);
+    res.status(500).json({ message: 'Fetch available slots failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Reports: Finance CSV (admin/manager) =====
+app.get('/api/reports/finance.csv', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { from, to } = req.query || {};
+    const where = {};
+    if (from) where.date = { [Op.gte]: String(from) };
+    if (to) where.date = where.date ? { ...where.date, [Op.lte]: String(to) } : { [Op.lte]: String(to) };
+    const invoices = await models.Invoice.findAll({ where, order: [['date','ASC'],['id','ASC']] });
+    const header = 'id,patient_id,amount,date,status\n';
+    const rows = invoices.map(inv => [inv.id, inv.patient_id, inv.amount, inv.date, inv.status].join(',')).join('\n');
+    const csv = header + rows + (rows ? '\n' : '');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="finance.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('/api/reports/finance.csv GET error:', err);
+    res.status(500).json({ message: 'Generate finance CSV failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Reports: Occupancy CSV (admin/manager) =====
+app.get('/api/reports/occupancy.csv', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    const [rows] = await pool.query(`
+      SELECT d.name AS department,
+             COUNT(b.id) AS total,
+             SUM(CASE WHEN b.status='occupied' THEN 1 ELSE 0 END) AS occupied
+      FROM departments d
+      LEFT JOIN wards w ON w.department_id = d.id
+      LEFT JOIN beds b ON b.ward_id = w.id
+      GROUP BY d.id, d.name
+      ORDER BY d.name ASC`);
+    const header = 'department,total,occupied,free\n';
+    const body = rows.map(r => {
+      const total = Number(r.total||0);
+      const occ = Number(r.occupied||0);
+      const free = Math.max(total - occ, 0);
+      return [r.department, total, occ, free].join(',');
+    }).join('\n');
+    const csv = header + body + (body ? '\n' : '');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="occupancy.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('/api/reports/occupancy.csv GET error:', err);
+    res.status(500).json({ message: 'Generate occupancy CSV failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Reports: Admissions CSV (admin/manager) =====
+// Placeholder since admissions table may not be populated. Export basic appointments as proxy.
+app.get('/api/reports/admissions.csv', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { from, to } = req.query || {};
+    const where = {};
+    if (from || to) {
+      where.date = {};
+      if (from) where.date[Op.gte] = String(from);
+      if (to) where.date[Op.lte] = String(to);
+    }
+    const list = await models.Appointment.findAll({ where, order: [['date','ASC'],['id','ASC']], limit: 5000 });
+    const header = 'id,patient_id,doctor_id,date,time,status\n';
+    const body = list.map(a => [a.id, a.patient_id, a.doctor_id ?? '', a.date, a.time, a.status || ''].join(',')).join('\n');
+    const csv = header + body + (body ? '\n' : '');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="admissions.csv"');
+    res.send(csv);
+  } catch (err) {
+    console.error('/api/reports/admissions.csv GET error:', err);
+    res.status(500).json({ message: 'Generate admissions CSV failed', details: toDbMessage(err) });
+  }
+});
 import express from 'express';
 import cors from 'cors';
 import { pool } from './mysql.js';
@@ -245,6 +348,496 @@ app.get('/api/ping', (_req, res) => {
   res.json({ message: 'pong' });
 });
 
+// ===== Server-Sent Events for notifications =====
+app.get('/api/events', async (req, res) => {
+  try {
+    // Authenticate: prefer Authorization header, else token query param
+    let user = null;
+    try {
+      const auth = req.headers.authorization || '';
+      const parts = auth.split(' ');
+      if (parts.length === 2 && parts[0] === 'Bearer' && JWT_SECRET) {
+        user = jwt.verify(parts[1], JWT_SECRET);
+      } else if (req.query?.token && JWT_SECRET) {
+        user = jwt.verify(String(req.query.token), JWT_SECRET);
+      }
+    } catch {}
+    if (!user) {
+      res.writeHead(401, { 'Content-Type': 'text/plain' });
+      return res.end('Unauthorized');
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no',
+      'Access-Control-Allow-Origin': '*',
+    });
+
+    const send = (event, data) => {
+      try {
+        if (event) res.write(`event: ${event}\n`);
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch {}
+    };
+
+    // Initial hello
+    send('message', { type: 'hello', time: new Date().toISOString() });
+
+    // On connect, send recent notifications for the user role
+    try {
+      const role = String(user.role || 'all');
+      const notifs = await models.Notification.findAll({
+        where: {
+          target_role: { [Op.in]: ['all', role] },
+        },
+        order: [['id','DESC']],
+        limit: 5,
+      });
+      for (const n of notifs.reverse()) {
+        send('notification', { id: n.id, title: n.title, message: n.message, role: n.target_role, created_at: n.created_at });
+      }
+    } catch {}
+
+    // Heartbeat
+    const hb = setInterval(() => {
+      send('ping', { t: Date.now() });
+    }, 30000);
+
+    req.on('close', () => {
+      clearInterval(hb);
+    });
+  } catch (err) {
+    try { res.end(); } catch {}
+  }
+});
+
+// Current authenticated user info
+app.get('/api/me', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.user?.sub);
+    const role = String(req.user?.role || '').toLowerCase();
+    const email = req.user?.email || '';
+    const name = req.user?.name || '';
+    res.json({ id, role, email, name });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load user' });
+  }
+});
+
+// Simplified patients list
+app.get('/api/patients/simple', requireAuth, requireRole('admin','manager','doctor'), async (_req, res) => {
+  try {
+    const rows = await models.Patient.findAll({ attributes: ['id','name','email'], order: [['id','ASC']], limit: 1000 });
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to load patients' });
+  }
+});
+
+// ===== Doctors list (auth) =====
+app.get('/api/doctors', requireAuth, async (_req, res) => {
+  try {
+    // users table: role='doctor'
+    const [rows] = await pool.query("SELECT id, name, email, role FROM users WHERE role = 'doctor' ORDER BY name ASC LIMIT 500");
+    res.json(rows);
+  } catch (err) {
+    console.error('/api/doctors GET error:', err);
+    res.status(500).json({ message: 'Fetch doctors failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Appointment create with conflict check (auth) =====
+app.post('/api/appointments', requireAuth, async (req, res) => {
+  try {
+    const { patient_id, doctor_id, date, time, notes } = req.body || {};
+    let pid = Number(patient_id);
+    const did = doctor_id ? Number(doctor_id) : null;
+    const role = String(req.user?.role || '').toLowerCase();
+    // If patient, infer patient_id from user
+    if (!pid && role === 'patient') {
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user?.sub)]);
+      pid = row?.id;
+    }
+    if (!pid || !date || !time) return res.status(400).json({ message: 'Missing patient_id/date/time' });
+    // Conflict check (same doctor/date/time)
+    if (did) {
+      const conflict = await models.Appointment.count({ where: { doctor_id: did, date: String(date), time: String(time) } });
+      if (conflict > 0) return res.status(409).json({ message: 'Selected slot is not available' });
+    }
+    const row = await models.Appointment.create({ patient_id: pid, doctor_id: did || null, date: String(date), time: String(time), notes: notes || null });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/appointments POST error:', err);
+    res.status(500).json({ message: 'Create appointment failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Admin Settings: Branches =====
+app.get('/api/branches', requireAuth, requireRole('admin'), async (_req, res) => {
+  try { const list = await models.Branch.findAll({ order: [['name','ASC']] }); res.json(list); }
+  catch (err) { console.error('/api/branches GET error:', err); res.status(500).json({ message: 'Fetch branches failed', details: toDbMessage(err) }); }
+});
+app.post('/api/branches', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Branch.create({ name: req.body?.name, address: req.body?.address }); res.status(201).json(row); }
+  catch (err) { console.error('/api/branches POST error:', err); res.status(500).json({ message: 'Create branch failed', details: toDbMessage(err) }); }
+});
+app.put('/api/branches/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Branch.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); await row.update({ name: req.body?.name, address: req.body?.address }); res.json(row); }
+  catch (err) { console.error('/api/branches PUT error:', err); res.status(500).json({ message: 'Update branch failed', details: toDbMessage(err) }); }
+});
+app.delete('/api/branches/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Branch.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); await row.destroy(); res.json({ ok: true }); }
+  catch (err) { console.error('/api/branches DELETE error:', err); res.status(500).json({ message: 'Delete branch failed', details: toDbMessage(err) }); }
+});
+
+// ===== Admin Settings: Services =====
+app.get('/api/services', requireAuth, requireRole('admin'), async (_req, res) => {
+  try { const list = await models.Service.findAll({ order: [['name','ASC']] }); res.json(list); }
+  catch (err) { console.error('/api/services GET error:', err); res.status(500).json({ message: 'Fetch services failed', details: toDbMessage(err) }); }
+});
+app.post('/api/services', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Service.create({ name: req.body?.name, price: req.body?.price ?? 0 }); res.status(201).json(row); }
+  catch (err) { console.error('/api/services POST error:', err); res.status(500).json({ message: 'Create service failed', details: toDbMessage(err) }); }
+});
+app.put('/api/services/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Service.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); await row.update({ name: req.body?.name, price: req.body?.price }); res.json(row); }
+  catch (err) { console.error('/api/services PUT error:', err); res.status(500).json({ message: 'Update service failed', details: toDbMessage(err) }); }
+});
+app.delete('/api/services/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Service.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); await row.destroy(); res.json({ ok: true }); }
+  catch (err) { console.error('/api/services DELETE error:', err); res.status(500).json({ message: 'Delete service failed', details: toDbMessage(err) }); }
+});
+
+// ===== Admin Settings: Templates =====
+app.get('/api/templates', requireAuth, requireRole('admin'), async (_req, res) => {
+  try { const list = await models.Template.findAll({ order: [['id','DESC']] }); res.json(list); }
+  catch (err) { console.error('/api/templates GET error:', err); res.status(500).json({ message: 'Fetch templates failed', details: toDbMessage(err) }); }
+});
+app.post('/api/templates', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const { type, key, subject, body, enabled } = req.body || {}; const row = await models.Template.create({ type, key, subject, body, enabled: enabled !== false }); res.status(201).json(row); }
+  catch (err) { console.error('/api/templates POST error:', err); res.status(500).json({ message: 'Create template failed', details: toDbMessage(err) }); }
+});
+app.put('/api/templates/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Template.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); const { type, key, subject, body, enabled } = req.body || {}; await row.update({ type, key, subject, body, enabled }); res.json(row); }
+  catch (err) { console.error('/api/templates PUT error:', err); res.status(500).json({ message: 'Update template failed', details: toDbMessage(err) }); }
+});
+app.delete('/api/templates/:id', requireAuth, requireRole('admin'), async (req, res) => {
+  try { const row = await models.Template.findByPk(Number(req.params.id)); if(!row) return res.status(404).json({message:'Not found'}); await row.destroy(); res.json({ ok: true }); }
+  catch (err) { console.error('/api/templates DELETE error:', err); res.status(500).json({ message: 'Delete template failed', details: toDbMessage(err) }); }
+});
+// ===== Audit logs (admin only)
+app.get('/api/audit', requireAuth, requireRole('admin'), async (req, res) => {
+  try {
+    const { from, to, user_id, action } = req.query || {};
+    const where = {};
+    if (user_id) where.user_id = Number(user_id);
+    if (action) where.action = String(action);
+    if (from || to) {
+      const fromDate = from ? new Date(String(from)) : null;
+      const toDate = to ? new Date(String(to)) : null;
+      where.created_at = {};
+      if (fromDate) where.created_at[Op.gte] = fromDate;
+      if (toDate) where.created_at[Op.lte] = toDate;
+    }
+    const logs = await models.AuditLog.findAll({ where, order: [['id','DESC']], limit: 500 });
+    res.json(logs);
+  } catch (err) {
+    console.error('/api/audit GET error:', err);
+    res.status(500).json({ message: 'Fetch audit logs failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Appointments by date range (any authenticated; doctors filter by own id by default) =====
+app.get('/api/appointments/range', requireAuth, async (req, res) => {
+  try {
+    const { from, to, doctor_id, patient_id } = req.query || {};
+    if (!from || !to) return res.status(400).json({ message: 'from and to are required (YYYY-MM-DD)' });
+    const where = { date: { [Op.gte]: String(from), [Op.lte]: String(to) } };
+    const role = String(req.user?.role || '').toLowerCase();
+    if (patient_id) where.patient_id = Number(patient_id);
+    if (doctor_id) where.doctor_id = Number(doctor_id);
+    if (!doctor_id && role === 'doctor') where.doctor_id = Number(req.user?.sub);
+    // Patients can only see their own
+    if (role === 'patient') {
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user?.sub)]);
+      const pid = row?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    }
+    const list = await models.Appointment.findAll({ where, order: [['date','ASC'],['time','ASC']], limit: 1000 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/appointments/range error:', err);
+    res.status(500).json({ message: 'Fetch appointments range failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Prescriptions =====
+// Create
+app.post('/api/prescriptions', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const { patient_id, diagnosis, medications, notes, date } = req.body || {};
+    const pid = Number(patient_id);
+    if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ message: 'Invalid patient_id' });
+    const patient = await models.Patient.findByPk(pid);
+    if (!patient) return res.status(400).json({ message: 'Invalid patient_id: not found' });
+    const docId = Number(req.user?.sub);
+    const row = await models.Prescription.create({ patient_id: pid, doctor_id: docId, diagnosis, medications: medications ? JSON.stringify(medications) : null, notes, date: date || new Date().toISOString().slice(0,10) });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/prescriptions POST error:', err);
+    res.status(500).json({ message: 'Create prescription failed', details: toDbMessage(err) });
+  }
+});
+// List
+app.get('/api/prescriptions', requireAuth, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    const where = {};
+    if (role === 'patient') {
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user?.sub)]);
+      const pid = row?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else if (req.query?.patient_id) {
+      where.patient_id = Number(req.query.patient_id);
+    }
+    const list = await models.Prescription.findAll({ where, order: [['id','DESC']], limit: 500 });
+    res.json(list.map(p => ({ ...p.toJSON(), medications: p.medications ? safeParseJSON(p.medications) : null })));
+  } catch (err) {
+    console.error('/api/prescriptions GET error:', err);
+    res.status(500).json({ message: 'Fetch prescriptions failed', details: toDbMessage(err) });
+  }
+});
+// Update (doctor/admin)
+app.put('/api/prescriptions/:id', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { diagnosis, medications, notes, date } = req.body || {};
+    const row = await models.Prescription.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.update({ diagnosis, medications: medications ? JSON.stringify(medications) : null, notes, date });
+    res.json({ ...row.toJSON(), medications: row.medications ? safeParseJSON(row.medications) : null });
+  } catch (err) {
+    console.error('/api/prescriptions PUT error:', err);
+    res.status(500).json({ message: 'Update prescription failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Lab Orders =====
+// Create
+app.post('/api/lab-orders', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const { patient_id, tests, notes } = req.body || {};
+    const pid = Number(patient_id);
+    if (!Number.isInteger(pid) || pid <= 0) return res.status(400).json({ message: 'Invalid patient_id' });
+    const patient = await models.Patient.findByPk(pid);
+    if (!patient) return res.status(400).json({ message: 'Invalid patient_id: not found' });
+    const docId = Number(req.user?.sub);
+    const row = await models.LabOrder.create({ patient_id: pid, doctor_id: docId, tests: tests ? JSON.stringify(tests) : null, notes });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/lab-orders POST error:', err);
+    res.status(500).json({ message: 'Create lab order failed', details: toDbMessage(err) });
+  }
+});
+// List
+app.get('/api/lab-orders', requireAuth, async (req, res) => {
+  try {
+    const role = String(req.user?.role || '').toLowerCase();
+    const where = {};
+    if (role === 'patient') {
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user?.sub)]);
+      const pid = row?.id;
+      if (!pid) return res.json([]);
+      where.patient_id = pid;
+    } else if (req.query?.patient_id) {
+      where.patient_id = Number(req.query.patient_id);
+    }
+    const list = await models.LabOrder.findAll({ where, order: [['id','DESC']], limit: 500 });
+    res.json(list.map(o => ({ ...o.toJSON(), tests: o.tests ? safeParseJSON(o.tests) : null })));
+  } catch (err) {
+    console.error('/api/lab-orders GET error:', err);
+    res.status(500).json({ message: 'Fetch lab orders failed', details: toDbMessage(err) });
+  }
+});
+// Update status
+app.put('/api/lab-orders/:id', requireAuth, requireRole('doctor','admin','laboratorist'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const { status, tests, notes, completed_at } = req.body || {};
+    const row = await models.LabOrder.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.update({ status, tests: tests ? JSON.stringify(tests) : row.tests, notes, completed_at });
+    res.json({ ...row.toJSON(), tests: row.tests ? safeParseJSON(row.tests) : null });
+  } catch (err) {
+    console.error('/api/lab-orders PUT error:', err);
+    res.status(500).json({ message: 'Update lab order failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Availability =====
+// Create/update availability entries
+app.post('/api/availability', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const { date, start_time, end_time, status } = req.body || {};
+    const doctor_user_id = Number(req.user?.sub);
+    if (!date) return res.status(400).json({ message: 'date is required' });
+    const row = await models.Availability.create({ doctor_user_id, date, start_time, end_time, status });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/availability POST error:', err);
+    res.status(500).json({ message: 'Create availability failed', details: toDbMessage(err) });
+  }
+});
+
+app.get('/api/availability', requireAuth, async (req, res) => {
+  try {
+    const { doctor_id, from, to } = req.query || {};
+    const role = String(req.user?.role || '').toLowerCase();
+    const where = {};
+    if (from && to) where.date = { [Op.gte]: String(from), [Op.lte]: String(to) };
+    if (doctor_id) where.doctor_user_id = Number(doctor_id);
+    if (!doctor_id && role === 'doctor') where.doctor_user_id = Number(req.user?.sub);
+    const list = await models.Availability.findAll({ where, order: [['date','ASC']], limit: 500 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/availability GET error:', err);
+    res.status(500).json({ message: 'Fetch availability failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Occupancy metrics =====
+app.get('/api/metrics/occupancy', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    // Aggregate by department via wards -> beds
+    const [totals] = await pool.query("SELECT COUNT(*) AS totalBeds, SUM(CASE WHEN status='occupied' THEN 1 ELSE 0 END) AS occupiedBeds FROM beds");
+    const [rows] = await pool.query(`
+      SELECT d.name AS department,
+             COUNT(b.id) AS total,
+             SUM(CASE WHEN b.status='occupied' THEN 1 ELSE 0 END) AS occupied
+      FROM departments d
+      LEFT JOIN wards w ON w.department_id = d.id
+      LEFT JOIN beds b ON b.ward_id = w.id
+      GROUP BY d.id, d.name
+      ORDER BY d.name ASC`);
+    const byDepartment = rows.map(r => ({
+      department: r.department,
+      total: Number(r.total || 0),
+      occupied: Number(r.occupied || 0),
+      free: Math.max(Number(r.total || 0) - Number(r.occupied || 0), 0),
+    }));
+    const totalBeds = Number(totals?.totalBeds || 0);
+    const occupiedBeds = Number(totals?.occupiedBeds || 0);
+    const freeBeds = Math.max(totalBeds - occupiedBeds, 0);
+    res.json({ totalBeds, occupiedBeds, freeBeds, byDepartment });
+  } catch (err) {
+    console.error('/api/metrics/occupancy error:', err);
+    res.status(500).json({ message: 'Fetch occupancy failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Inventory with low_stock filter =====
+app.get('/api/inventory', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const low = String(req.query.low_stock||'').toLowerCase();
+    if (['1','true','yes','on'].includes(low)) {
+      const list = await models.InventoryItem.findAll({
+        where: sequelize.where(sequelize.col('quantity'), '<=', sequelize.col('reorder_threshold')),
+        order: [[sequelize.literal('(reorder_threshold - quantity)'),'DESC'], ['id','DESC']],
+      });
+      return res.json(list);
+    }
+    const list = await models.InventoryItem.findAll({ order: [['id','DESC']] });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/inventory GET error:', err);
+    res.status(500).json({ message: 'Fetch inventory failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Staff list =====
+app.get('/api/staff', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const where = {};
+    if (req.query?.department_id) where.department_id = Number(req.query.department_id);
+    if (req.query?.role) where.role = String(req.query.role);
+    const list = await models.Staff.findAll({ where, order: [['id','ASC']], limit: 1000 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/staff GET error:', err);
+    res.status(500).json({ message: 'Fetch staff failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Departments list =====
+app.get('/api/departments', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    const list = await models.Department.findAll({ order: [['name','ASC']], limit: 1000 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/departments GET error:', err);
+    res.status(500).json({ message: 'Fetch departments failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Attendance list (filter by date) =====
+app.get('/api/attendance', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const date = String(req.query.date || '').slice(0,10);
+    const where = date ? { date } : {};
+    const list = await models.Attendance.findAll({ where, include: [{ model: models.Staff, attributes: ['id','name','role','department_id'] }], order: [['date','DESC'],['id','DESC']], limit: 1000 });
+    res.json(list);
+  } catch (err) {
+    console.error('/api/attendance GET error:', err);
+    res.status(500).json({ message: 'Fetch attendance failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Staff department assignment =====
+app.put('/api/staff/:id/department', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const department_id = Number(req.body?.department_id);
+    const staff = await models.Staff.findByPk(id);
+    if (!staff) return res.status(404).json({ message: 'Staff not found' });
+    await staff.update({ department_id: Number.isFinite(department_id) ? department_id : null });
+    res.json(staff);
+  } catch (err) {
+    console.error('/api/staff/:id/department PUT error:', err);
+    res.status(500).json({ message: 'Update staff department failed', details: toDbMessage(err) });
+  }
+});
+
+// ===== Manager/Admin: Delete shift =====
+app.delete('/api/shifts/:id', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Shift.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.destroy();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/shifts/:id DELETE error:', err);
+    res.status(500).json({ message: 'Delete shift failed', details: toDbMessage(err) });
+  }
+});
+
+app.put('/api/availability/:id', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Availability.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const { date, start_time, end_time, status } = req.body || {};
+    await row.update({ date, start_time, end_time, status });
+    res.json(row);
+  } catch (err) {
+    console.error('/api/availability PUT error:', err);
+    res.status(500).json({ message: 'Update availability failed', details: toDbMessage(err) });
+  }
+});
 // ===== Metrics: Doctor (doctor/admin)
 app.get('/api/metrics/doctor', requireAuth, requireRole('doctor','admin'), async (req, res) => {
   try {

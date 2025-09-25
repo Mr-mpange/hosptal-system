@@ -47,6 +47,18 @@ const Billing = () => {
     return data;
   };
 
+  const pay = async (id: number) => {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
+      const res = await fetch(`/api/invoices/${id}/pay`, { method: 'POST', headers, body: JSON.stringify({ method: 'mock' }) });
+      await parseResponse(res);
+      await loadInvoices();
+      alert('Payment successful');
+    } catch (err: any) {
+      alert(`Payment failed: ${err?.message || 'Unknown error'}`);
+    }
+  };
+
   const authHeaders = () => {
     const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
     const headers: Record<string, string> = {};
@@ -269,6 +281,9 @@ const Billing = () => {
                       <td className="py-2 pr-4">{inv.date}</td>
                       <td className="py-2 pr-4 capitalize">{inv.status}</td>
                       <td className="py-2 pr-4 space-x-2">
+                        {inv.status === 'pending' && (
+                          <Button size="sm" onClick={() => pay(inv.id)}>Pay</Button>
+                        )}
                         <Button size="sm" variant="secondary" onClick={() => download(inv.id)}>Download</Button>
                       </td>
                     </tr>
