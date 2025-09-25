@@ -80,7 +80,8 @@ export async function initModels() {
     patient_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
     amount: { type: DataTypes.DECIMAL(10,2), allowNull: false },
     date: { type: DataTypes.DATEONLY, allowNull: false },
-    status: { type: DataTypes.ENUM('pending','paid','void'), allowNull: false, defaultValue: 'pending' },
+    due_date: { type: DataTypes.DATEONLY, allowNull: true },
+    status: { type: DataTypes.ENUM('pending','partially_paid','paid','void','overdue','cancelled'), allowNull: false, defaultValue: 'pending' },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'invoices' });
 
@@ -264,6 +265,31 @@ export async function initModels() {
     reference: { type: DataTypes.STRING(160), allowNull: true },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'payments' });
+
+  // Control Numbers
+  models.ControlNumber = sequelize.define('control_numbers', {
+    id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+    invoice_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+    number: { type: DataTypes.STRING(64), allowNull: false, unique: true },
+    status: { type: DataTypes.ENUM('active','cancelled','expired','reissued'), allowNull: false, defaultValue: 'active' },
+    total_amount: { type: DataTypes.DECIMAL(10,2), allowNull: false },
+    remaining_balance: { type: DataTypes.DECIMAL(10,2), allowNull: false },
+    provider: { type: DataTypes.STRING(40), allowNull: true },
+    expiry_at: { type: DataTypes.DATE, allowNull: true },
+    created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+  }, { tableName: 'control_numbers', indexes: [ { unique: true, fields: ['number'] }, { fields: ['invoice_id'] } ] });
+
+  // Insurance Claims
+  models.InsuranceClaim = sequelize.define('insurance_claims', {
+    id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+    invoice_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+    claim_number: { type: DataTypes.STRING(64), allowNull: false },
+    provider: { type: DataTypes.STRING(64), allowNull: true },
+    status: { type: DataTypes.ENUM('submitted','approved','rejected','paid','pending'), allowNull: false, defaultValue: 'pending' },
+    claim_amount: { type: DataTypes.DECIMAL(10,2), allowNull: true },
+    remarks: { type: DataTypes.TEXT, allowNull: true },
+    created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+  }, { tableName: 'insurance_claims', indexes: [ { fields: ['invoice_id'] }, { fields: ['claim_number'] } ] });
 
   // User 2FA (TOTP secret)
   models.User2FA = sequelize.define('user_2fa', {

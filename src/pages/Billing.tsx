@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
+import { CardDescription } from "@/components/ui/card";
 
 interface InvoiceRow {
   id: number;
@@ -32,6 +33,7 @@ const Billing = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<InvoiceRow[]>([]);
+  const [metrics, setMetrics] = useState<{ pending:number; paid:number; partially_paid:number; overdue:number; claims:number }|null>(null);
 
   const [loadingPatients, setLoadingPatients] = useState(true);
   const [patientsError, setPatientsError] = useState<string | null>(null);
@@ -47,6 +49,74 @@ const Billing = () => {
     }
     if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
     return data;
+  };
+
+  const loadMetrics = async () => {
+    try {
+      const res = await fetch('/api/metrics/invoices-status', { headers: authHeaders() });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      const data = await res.json();
+      setMetrics(data);
+    } catch {}
+  };
+
+  // Control Number lifecycle helpers
+  const listCN = async (invoiceId: number) => {
+    try {
+      const res = await fetch(`/api/control-numbers?invoice_id=${invoiceId}`, { headers: authHeaders() });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      const data = await res.json();
+      const active = (Array.isArray(data) ? data : []).filter((c:any)=>c.status==='active');
+      toast({ title:`CNs: ${data?.length||0}`, description: active.length ? `Active: ${active[0]?.number}` : 'No active CN' });
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'List CN failed', description: e?.message||'Unknown error' });
+    }
+  };
+
+  const generateCN = async (invoiceId: number) => {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
+      const res = await fetch(`/api/control-numbers`, { method:'POST', headers, body: JSON.stringify({ invoice_id: invoiceId }) });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      const row = await res.json();
+      toast({ title:'Control number created', description: row?.number || '' });
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Generate CN failed', description: e?.message||'Unknown error' });
+    }
+  };
+
+  const latestCNId = async (invoiceId: number): Promise<number|null> => {
+    const res = await fetch(`/api/control-numbers?invoice_id=${invoiceId}`, { headers: authHeaders() });
+    if (!res.ok) return null;
+    const list = await res.json();
+    const arr = Array.isArray(list) ? list : [];
+    if (!arr.length) return null;
+    return Number(arr[0]?.id) || null; // ordered DESC in API
+  };
+
+  const cancelCN = async (invoiceId: number) => {
+    try {
+      const id = await latestCNId(invoiceId);
+      if (!id) { toast({ title:'No CN to cancel' }); return; }
+      const res = await fetch(`/api/control-numbers/${id}/cancel`, { method:'POST', headers: authHeaders() });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      toast({ title:'Control number cancelled', description:`#${id}` });
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Cancel CN failed', description: e?.message||'Unknown error' });
+    }
+  };
+
+  const reissueCN = async (invoiceId: number) => {
+    try {
+      const id = await latestCNId(invoiceId);
+      if (!id) { toast({ title:'No CN to reissue' }); return; }
+      const res = await fetch(`/api/control-numbers/${id}/reissue`, { method:'POST', headers: authHeaders() });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      const data = await res.json();
+      toast({ title:'CN reissued', description: data?.new?.number || 'No new CN (settled?)' });
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Reissue CN failed', description: e?.message||'Unknown error' });
+    }
   };
 
   const initiate = async (id: number) => {
@@ -135,7 +205,7 @@ const Billing = () => {
     } catch {}
   };
 
-  useEffect(() => { loadInvoices(); loadPatients(); loadMeta(); }, []);
+  useEffect(() => { loadInvoices(); loadPatients(); loadMeta(); loadMetrics(); }, []);
 
   const download = async (id: number) => {
     try {
@@ -181,7 +251,45 @@ const Billing = () => {
 
   return (
     <div className="p-6 space-y-6">
-      <h1 className="text-2xl font-bold">Billing</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Billing</h1>
+        <div className="flex items-center gap-2">
+          <Button variant="outline" onClick={reconcileNow}>Reconcile Now</Button>
+          <Button variant="outline" onClick={overdueJob}>Overdue/Expire CNs</Button>
+        </div>
+      </div>
+
+      {/* Invoice Status Metrics */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Invoice Status</CardTitle>
+          <CardDescription>Paid, Pending, Overdue, Claims</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
+            <div className="p-4 rounded-md border">
+              <div className="text-sm text-muted-foreground">Paid</div>
+              <div className="text-2xl font-bold">{metrics ? metrics.paid : '—'}</div>
+            </div>
+            <div className="p-4 rounded-md border">
+              <div className="text-sm text-muted-foreground">Pending</div>
+              <div className="text-2xl font-bold">{metrics ? metrics.pending : '—'}</div>
+            </div>
+            <div className="p-4 rounded-md border">
+              <div className="text-sm text-muted-foreground">Partially Paid</div>
+              <div className="text-2xl font-bold">{metrics ? metrics.partially_paid : '—'}</div>
+            </div>
+            <div className="p-4 rounded-md border">
+              <div className="text-sm text-muted-foreground">Overdue</div>
+              <div className="text-2xl font-bold">{metrics ? metrics.overdue : '—'}</div>
+            </div>
+            <div className="p-4 rounded-md border">
+              <div className="text-sm text-muted-foreground">Claims</div>
+              <div className="text-2xl font-bold">{metrics ? metrics.claims : '—'}</div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
@@ -297,7 +405,34 @@ const Billing = () => {
                         {inv.status === 'pending' && (
                           <Button size="sm" onClick={() => initiate(inv.id)}>Initiate</Button>
                         )}
+                        <Button size="sm" variant="outline" onClick={() => generateCN(inv.id)}>CN Generate</Button>
+                        <Button size="sm" variant="outline" onClick={() => listCN(inv.id)}>CN List</Button>
+                        <Button size="sm" variant="outline" onClick={() => reissueCN(inv.id)}>CN Reissue</Button>
+                        <Button size="sm" variant="outline" onClick={() => cancelCN(inv.id)}>CN Cancel</Button>
                         <Button size="sm" variant="outline" onClick={() => checkStatus(inv.id)}>Check</Button>
+                        <Button size="sm" variant="secondary" onClick={async ()=>{
+                          try{
+                            const claim_number = prompt('Claim number:')||'';
+                            const provider = prompt('Provider (e.g., NHIF):')||'';
+                            const claim_amount_raw = prompt('Claim amount (optional):')||'';
+                            const claim_amount = claim_amount_raw ? Number(claim_amount_raw) : undefined;
+                            if (!claim_number) { toast({ variant:'destructive', title:'Claim number required' }); return; }
+                            const headers: Record<string, string> = { 'Content-Type':'application/json', ...authHeaders() };
+                            const res = await fetch('/api/insurance-claims', { method:'POST', headers, body: JSON.stringify({ invoice_id: inv.id, claim_number, provider, claim_amount }) });
+                            if (!res.ok) { const t = await res.text(); throw new Error(t); }
+                            toast({ title:'Claim submitted', description: claim_number });
+                            await loadMetrics();
+                          }catch(e:any){ toast({ variant:'destructive', title:'Submit claim failed', description: e?.message||'Unknown error' }); }
+                        }}>Claim Create</Button>
+                        <Button size="sm" variant="secondary" onClick={async ()=>{
+                          try{
+                            const res = await fetch(`/api/insurance-claims?invoice_id=${inv.id}`, { headers: authHeaders() });
+                            if (!res.ok) { const t = await res.text(); throw new Error(t); }
+                            const data = await res.json();
+                            const cnt = Array.isArray(data) ? data.length : 0;
+                            toast({ title:`Claims: ${cnt}`, description: cnt? (data[0]?.status || 'status') : 'None' });
+                          }catch(e:any){ toast({ variant:'destructive', title:'Fetch claims failed', description: e?.message||'Unknown error' }); }
+                        }}>Claims</Button>
                         <Button size="sm" variant="secondary" onClick={() => download(inv.id)}>Download</Button>
                       </td>
                     </tr>

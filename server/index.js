@@ -8,6 +8,225 @@ const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 
+// ===== Overdue/Expiry job =====
+app.post('/api/jobs/overdue', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    const today = new Date().toISOString().slice(0,10);
+    // Mark overdue invoices: due_date < today and status in pending/partially_paid
+    try {
+      await models.Invoice.update({ status: 'overdue' }, { where: { status: { [Op.in]: ['pending','partially_paid'] }, date: { [Op.lt]: today } } });
+    } catch {}
+    // Expire control numbers past expiry_at
+    try {
+      const expired = await models.ControlNumber.findAll({ where: { status: 'active', expiry_at: { [Op.lt]: new Date() } } });
+      for (const cn of expired) await cn.update({ status: 'expired' });
+    } catch {}
+    res.json({ ok: true });
+  } catch (err) { console.error('overdue job error', err); res.status(500).json({ message: 'Failed' }); }
+});
+
+// ===== Insurance Claims =====
+app.post('/api/insurance-claims', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { invoice_id, claim_number, provider, claim_amount, remarks } = req.body || {};
+    if (!invoice_id || !claim_number) return res.status(400).json({ message: 'invoice_id and claim_number required' });
+    const row = await models.InsuranceClaim.create({ invoice_id: Number(invoice_id), claim_number, provider: provider||null, claim_amount: claim_amount||null, remarks: remarks||null });
+    res.status(201).json(row);
+  } catch (err) { console.error('/api/insurance-claims POST error:', err); res.status(500).json({ message: 'Failed' }); }
+});
+
+app.put('/api/insurance-claims/:id', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.InsuranceClaim.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const { status, claim_amount, remarks } = req.body || {};
+    await row.update({ status: status || row.status, claim_amount: claim_amount ?? row.claim_amount, remarks: remarks ?? row.remarks });
+    res.json(row);
+  } catch (err) { console.error('/api/insurance-claims PUT error:', err); res.status(500).json({ message: 'Failed' }); }
+});
+
+app.get('/api/insurance-claims', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const where = {};
+    if (req.query.invoice_id) where.invoice_id = Number(req.query.invoice_id);
+    if (req.query.status) where.status = String(req.query.status);
+    const list = await models.InsuranceClaim.findAll({ where, order: [['id','DESC']], limit: 100 });
+    res.json(list);
+  } catch (err) { res.status(500).json({ message: 'Failed' }); }
+});
+
+// ===== Finance: invoice status metrics =====
+app.get('/api/metrics/invoices-status', requireAuth, async (_req, res) => {
+  try {
+    const q = async (status) => {
+      const [rows] = await pool.query('SELECT COUNT(*) c FROM invoices WHERE status = ?', [status]);
+      return Number(rows?.[0]?.c || 0);
+    };
+    const [pnd, pd, ppd, ovr] = await Promise.all([
+      q('pending'), q('paid'), q('partially_paid'), q('overdue')
+    ]);
+    // claims count (pending)
+    let claims = 0;
+    try {
+      const [r] = await pool.query("SELECT COUNT(*) c FROM insurance_claims WHERE status IN ('submitted','pending')");
+      claims = Number(r?.[0]?.c || 0);
+    } catch {}
+    res.json({ pending: pnd, paid: pd, partially_paid: ppd, overdue: ovr, claims });
+  } catch (err) {
+    console.error('/api/metrics/invoices-status error:', err);
+    res.status(500).json({ message: 'Failed' });
+  }
+});
+
+// ===== Control Number helpers =====
+function randomControlNumber() {
+  const n = Date.now().toString().slice(-8) + Math.floor(Math.random()*10000).toString().padStart(4,'0');
+  return `CN${n}`;
+}
+
+async function getInvoiceOutstanding(invoiceId) {
+  const inv = await models.Invoice.findByPk(Number(invoiceId));
+  if (!inv) throw new Error('Invoice not found');
+  const pays = await models.Payment.findAll({ where: { invoice_id: Number(invoiceId), status: 'success' }, attributes: ['amount'] });
+  const paid = pays.reduce((s,p)=> s + Number(p.amount||0), 0);
+  return Math.max(0, Number(inv.amount||0) - paid);
+}
+
+// ===== Control Numbers API =====
+// Create (generate) control number
+app.post('/api/control-numbers', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const { invoice_id, provider, expiry_at } = req.body || {};
+    const invoiceId = Number(invoice_id);
+    if (!invoiceId) return res.status(400).json({ message: 'invoice_id required' });
+    const outstanding = await getInvoiceOutstanding(invoiceId);
+    if (outstanding <= 0) return res.status(400).json({ message: 'Invoice already settled' });
+    const number = randomControlNumber();
+    const row = await models.ControlNumber.create({ invoice_id: invoiceId, number, status:'active', total_amount: outstanding, remaining_balance: outstanding, provider: provider||null, expiry_at: expiry_at||null });
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/control-numbers POST error:', err);
+    res.status(500).json({ message: 'Create control number failed' });
+  }
+});
+
+// List by invoice or status
+app.get('/api/control-numbers', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const where = {};
+    if (req.query.invoice_id) where.invoice_id = Number(req.query.invoice_id);
+    if (req.query.status) where.status = String(req.query.status);
+    const list = await models.ControlNumber.findAll({ where, order: [['id','DESC']], limit: 100 });
+    res.json(list);
+  } catch (err) { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Cancel a control number
+app.post('/api/control-numbers/:id/cancel', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const cn = await models.ControlNumber.findByPk(id);
+    if (!cn) return res.status(404).json({ message: 'Not found' });
+    await cn.update({ status: 'cancelled' });
+    res.json(cn);
+  } catch (err) { res.status(500).json({ message: 'Cancel failed' }); }
+});
+
+// Reissue: mark old and create a new control number for remaining balance
+app.post('/api/control-numbers/:id/reissue', requireAuth, requireRole('admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const old = await models.ControlNumber.findByPk(id);
+    if (!old) return res.status(404).json({ message: 'Not found' });
+    const outstanding = await getInvoiceOutstanding(old.invoice_id);
+    await old.update({ status: 'reissued' });
+    if (outstanding <= 0) return res.json({ old, new: null });
+    const number = randomControlNumber();
+    const row = await models.ControlNumber.create({ invoice_id: old.invoice_id, number, status:'active', total_amount: outstanding, remaining_balance: outstanding, provider: old.provider||null, expiry_at: old.expiry_at||null });
+    res.json({ old, new: row });
+  } catch (err) { res.status(500).json({ message: 'Reissue failed' }); }
+});
+
+// ===== Webhook stubs =====
+function verifySignature(req, provider) {
+  try {
+    const secret = provider === 'bank' ? (process.env.BANK_WEBHOOK_SECRET||'') : (process.env.MOMO_WEBHOOK_SECRET||'');
+    const sig = req.headers['x-signature'] || '';
+    if (!secret || !sig) return false; // if not configured, reject; set to true to relax in dev
+    const body = JSON.stringify(req.body||{});
+    const h = crypto.createHmac('sha256', secret).update(body).digest('hex');
+    return sig === h;
+  } catch { return false; }
+}
+
+app.post('/api/webhooks/mobile-money', async (req, res) => {
+  try {
+    if (!verifySignature(req, 'momo')) return res.status(401).json({ message: 'invalid signature' });
+    const { control_number, amount, provider_tx_id, status } = req.body || {};
+    if (!control_number) return res.status(400).json({ message: 'control_number required' });
+    const cn = await models.ControlNumber.findOne({ where: { number: String(control_number) } });
+    if (!cn) return res.status(404).json({ message: 'Control number not found' });
+    const amt = Number(amount||0);
+    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'mobile_money', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: null });
+    if (status==='success') {
+      const newRemain = Math.max(0, Number(cn.remaining_balance||0) - amt);
+      await cn.update({ remaining_balance: newRemain });
+      if (newRemain === 0) {
+        await models.Invoice.update({ status: 'paid' }, { where: { id: cn.invoice_id } });
+      } else {
+        await models.Invoice.update({ status: 'partially_paid' }, { where: { id: cn.invoice_id } });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error('mobile-money webhook error', err); res.status(500).json({ message: 'error' }); }
+});
+
+app.post('/api/webhooks/bank', async (req, res) => {
+  try {
+    if (!verifySignature(req, 'bank')) return res.status(401).json({ message: 'invalid signature' });
+    const { control_number, amount, provider_tx_id, status } = req.body || {};
+    if (!control_number) return res.status(400).json({ message: 'control_number required' });
+    const cn = await models.ControlNumber.findOne({ where: { number: String(control_number) } });
+    if (!cn) return res.status(404).json({ message: 'Control number not found' });
+    const amt = Number(amount||0);
+    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'bank_transfer', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: null });
+    if (status==='success') {
+      const newRemain = Math.max(0, Number(cn.remaining_balance||0) - amt);
+      await cn.update({ remaining_balance: newRemain });
+      if (newRemain === 0) {
+        await models.Invoice.update({ status: 'paid' }, { where: { id: cn.invoice_id } });
+      } else {
+        await models.Invoice.update({ status: 'partially_paid' }, { where: { id: cn.invoice_id } });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error('bank webhook error', err); res.status(500).json({ message: 'error' }); }
+});
+
+// ===== Reconciliation (simulation) =====
+app.post('/api/reconcile/payments', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try {
+    // For demo: set random initiated payments to success
+    const inits = await models.Payment.findAll({ where: { status: 'initiated' }, limit: 10 });
+    for (const p of inits) {
+      const success = Math.random() > 0.3;
+      if (!success) continue;
+      await p.update({ status: 'success', provider_tx_id: p.provider_tx_id || `SIM-${Date.now()}` });
+      if (p.invoice_id) {
+        const cn = await models.ControlNumber.findOne({ where: { invoice_id: p.invoice_id, status: 'active' }, order: [['id','DESC']] });
+        if (cn) {
+          const newRemain = Math.max(0, Number(cn.remaining_balance||0) - Number(p.amount||0));
+          await cn.update({ remaining_balance: newRemain });
+          if (newRemain === 0) await models.Invoice.update({ status: 'paid' }, { where: { id: p.invoice_id } });
+          else await models.Invoice.update({ status: 'partially_paid' }, { where: { id: p.invoice_id } });
+        }
+      }
+    }
+    res.json({ ok: true, updated: inits.length });
+  } catch (err) { console.error('reconcile error', err); res.status(500).json({ message: 'Failed' }); }
+});
+
 app.post('/api/inventory', requireAuth, requireRole('admin','manager'), async (req, res) => {
   try {
     const { name, sku, quantity, reorder_threshold, unit } = req.body || {};
@@ -188,6 +407,7 @@ import { pool } from './mysql.js';
 import { sequelize, initModels, syncSequelize, models } from './sequelize.js';
 import jwt from 'jsonwebtoken';
 import { Op } from 'sequelize';
+import crypto from 'crypto';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
