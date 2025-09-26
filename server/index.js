@@ -10,6 +10,30 @@ const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 
+// Request OTP during two-step login using temp_token
+app.post('/api/login/otp/request', async (req, res) => {
+  try {
+    const { temp_token } = req.body || {};
+    if (!temp_token) return res.status(400).json({ message: 'temp_token required' });
+    if (!JWT_SECRET) return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
+    let decoded = null;
+    try { decoded = jwt.verify(String(temp_token), JWT_SECRET); } catch (e) { return res.status(401).json({ message: 'Invalid or expired temp token' }); }
+    if (!decoded?.sub || !decoded?.otp_pending) return res.status(400).json({ message: 'Invalid temp token' });
+    const userId = Number(decoded.sub);
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const code = String(Math.floor(100000 + Math.random()*900000));
+    const expires = new Date(Date.now() + 5*60*1000);
+    const channel = rec.contact.includes('@') ? 'email' : 'sms';
+    await models.UserOTP.create({ user_id: userId, channel, code, expires_at: expires });
+    // TODO: integrate real email/SMS provider here
+    res.json({ sent: true, channel, to: rec.contact, code }); // return code only for development
+  } catch (err) {
+    console.error('/api/login/otp/request error:', err);
+    return res.status(500).json({ message: 'OTP request failed', details: toDbMessage(err) });
+  }
+});
+
 // Core server imports and initialization must come BEFORE any route declarations
 import express from 'express';
 import cors from 'cors';
@@ -753,8 +777,8 @@ app.post('/api/2fa/setup', requireAuth, async (req, res) => {
     const otpauth = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
     // Save or update DB record with temp secret (enabled=false until verified)
     const existing = await models.User2FA.findByPk(userId);
-    if (existing) await existing.update({ totp_secret: secret, enabled: false });
-    else await models.User2FA.create({ user_id: userId, totp_secret: secret, enabled: false });
+    if (existing) await existing.update({ totp_secret: secret, method: 'totp', enabled: false });
+    else await models.User2FA.create({ user_id: userId, totp_secret: secret, method: 'totp', enabled: false });
     res.json({ secret, otpauth });
   } catch (e) { res.status(500).json({ message: 'Setup failed' }); }
 });
@@ -781,6 +805,54 @@ app.post('/api/2fa/disable', requireAuth, async (req, res) => {
     await models.User2FA.destroy({ where: { user_id: userId } });
     res.json({ enabled: false });
   } catch (e) { res.status(500).json({ message: 'Disable failed' }); }
+});
+
+// Set preferred 2FA method and contact (for OTP)
+app.post('/api/2fa/method', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    const method = String(req.body?.method||'').toLowerCase();
+    const contact = req.body?.contact ? String(req.body.contact) : null;
+    if (!['totp','otp'].includes(method)) return res.status(400).json({ message: 'Invalid method' });
+    if (method === 'otp' && !contact) return res.status(400).json({ message: 'contact required for otp' });
+    const existing = await models.User2FA.findByPk(userId);
+    if (existing) await existing.update({ method, contact: contact||null }); else await models.User2FA.create({ user_id: userId, method, contact: contact||null, enabled: false });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: 'Failed to set method' }); }
+});
+
+// Request OTP (email/SMS) - dev: returns code in response; replace with real sender
+app.post('/api/2fa/otp/request', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const code = String(Math.floor(100000 + Math.random()*900000));
+    const expires = new Date(Date.now() + 5*60*1000);
+    const channel = rec.contact.includes('@') ? 'email' : 'sms';
+    await models.UserOTP.create({ user_id: userId, channel, code, expires_at: expires });
+    // TODO: integrate real email/SMS provider here
+    res.json({ sent: true, channel, to: rec.contact, code }); // return code only for development
+  } catch (e) { res.status(500).json({ message: 'OTP request failed' }); }
+});
+
+// Verify OTP and enable method
+app.post('/api/2fa/otp/verify', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    const code = String(req.body?.code||'').trim();
+    if (!userId || !code) return res.status(400).json({ message: 'Invalid request' });
+    const now = new Date();
+    const row = await models.UserOTP.findOne({ where: { user_id: userId, code, used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
+    if (!row) return res.status(400).json({ message: 'Invalid or expired code' });
+    await row.update({ used_at: new Date() });
+    // Enable 2FA as OTP method
+    const rec = await models.User2FA.findByPk(userId);
+    if (rec) await rec.update({ method: 'otp', enabled: true }); else await models.User2FA.create({ user_id: userId, method: 'otp', enabled: true });
+    res.json({ enabled: true, method: 'otp' });
+  } catch (e) { res.status(500).json({ message: 'OTP verify failed' }); }
 });
 
 // Tiny logger for debugging
@@ -867,10 +939,20 @@ app.post('/api/login/verify-otp', async (req, res) => {
     const user = rows && rows[0];
     if (!user) return res.status(404).json({ message: 'User not found' });
     const rec = await models.User2FA.findByPk(userId);
-    const secret = rec?.totp_secret;
-    if (!secret || !rec?.enabled) return res.status(400).json({ message: '2FA not enabled' });
-    const validCodes = totp(secret);
-    const ok = validCodes.includes(String(code));
+    if (!rec?.enabled) return res.status(400).json({ message: '2FA not enabled' });
+    let ok = false;
+    if (rec.method === 'totp') {
+      const secret = rec?.totp_secret;
+      if (!secret) return res.status(400).json({ message: '2FA secret missing' });
+      const validCodes = totp(secret);
+      ok = validCodes.includes(String(code));
+    } else if (rec.method === 'otp') {
+      const now = new Date();
+      const row = await models.UserOTP.findOne({ where: { user_id: userId, code: String(code), used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
+      if (row) { ok = true; await row.update({ used_at: new Date() }); }
+    } else {
+      return res.status(400).json({ message: 'Unsupported 2FA method' });
+    }
     if (!ok) return res.status(400).json({ message: 'Invalid code' });
     const token = signToken(user);
     return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });

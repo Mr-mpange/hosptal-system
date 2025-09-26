@@ -295,9 +295,22 @@ export async function initModels() {
   models.User2FA = sequelize.define('user_2fa', {
     user_id: { type: DataTypes.INTEGER.UNSIGNED, primaryKey: true },
     totp_secret: { type: DataTypes.STRING(160), allowNull: true },
+    method: { type: DataTypes.ENUM('totp','otp'), allowNull: true },
+    contact: { type: DataTypes.STRING(160), allowNull: true }, // email or phone for OTP
     enabled: { type: DataTypes.BOOLEAN, allowNull: false, defaultValue: false },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
   }, { tableName: 'user_2fa' });
+
+  // One-Time Passwords for login/verification
+  models.UserOTP = sequelize.define('user_otp', {
+    id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },
+    user_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
+    channel: { type: DataTypes.ENUM('email','sms'), allowNull: false },
+    code: { type: DataTypes.STRING(12), allowNull: false },
+    expires_at: { type: DataTypes.DATE, allowNull: false },
+    used_at: { type: DataTypes.DATE, allowNull: true },
+    created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },
+  }, { tableName: 'user_otp', indexes: [ { fields: ['user_id'] }, { fields: ['expires_at'] } ] });
   // Audit Logs
   models.AuditLog = sequelize.define('audit_logs', {
     id: { type: DataTypes.INTEGER.UNSIGNED, autoIncrement: true, primaryKey: true },

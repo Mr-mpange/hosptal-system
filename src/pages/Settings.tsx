@@ -104,6 +104,8 @@ const Settings = () => {
   const [twofaSecret, setTwofaSecret] = useState<string>('');
   const [twofaOtpAuth, setTwofaOtpAuth] = useState<string>('');
   const [twofaCode, setTwofaCode] = useState<string>('');
+  const [twofaMethod, setTwofaMethod] = useState<'totp'|'otp'>('totp');
+  const [twofaContact, setTwofaContact] = useState<string>('');
 
   const authHeaders = useMemo(() => {
     const token = (() => { try { return localStorage.getItem("auth_token") || undefined; } catch { return undefined; } })();
@@ -447,39 +449,85 @@ const Settings = () => {
               <p className="text-sm text-muted-foreground mb-3">Enhance account security by requiring a 6-digit code from an authenticator app (Google Authenticator, Authy, etc.).</p>
               {!twofaEnabled ? (
                 <div className="space-y-4">
-                  {!twofaSecret ? (
-                    <Button onClick={async ()=>{
-                      try {
-                        const res = await fetch('/api/2fa/setup', { method:'POST', headers: { 'Content-Type':'application/json', ...authHeaders } });
-                        const data = await res.json();
-                        if (!res.ok) throw new Error(data?.message||'Setup failed');
-                        setTwofaSecret(String(data.secret||''));
-                        setTwofaOtpAuth(String(data.otpauth||''));
-                      } catch (e:any) { toast({ variant:'destructive', title:'Setup failed', description: e?.message||'Unknown error' }); }
-                    }}>Begin 2FA Setup</Button>
-                  ) : (
+                  <div className="space-y-2">
+                    <Label className="mb-1 block">Method</Label>
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 text-sm"><input type="radio" name="twofa_method" checked={twofaMethod==='totp'} onChange={()=> setTwofaMethod('totp')}/> Authenticator App (TOTP)</label>
+                      <label className="flex items-center gap-2 text-sm"><input type="radio" name="twofa_method" checked={twofaMethod==='otp'} onChange={()=> setTwofaMethod('otp')}/> OTP via Email/SMS</label>
+                    </div>
+                  </div>
+                  {twofaMethod === 'totp' && (
+                    !twofaSecret ? (
+                      <Button onClick={async ()=>{
+                        try {
+                          const res = await fetch('/api/2fa/setup', { method:'POST', headers: { 'Content-Type':'application/json', ...authHeaders } });
+                          const data = await res.json();
+                          if (!res.ok) throw new Error(data?.message||'Setup failed');
+                          setTwofaSecret(String(data.secret||''));
+                          setTwofaOtpAuth(String(data.otpauth||''));
+                        } catch (e:any) { toast({ variant:'destructive', title:'Setup failed', description: e?.message||'Unknown error' }); }
+                      }}>Begin 2FA Setup</Button>
+                    ) : (
+                      <div className="space-y-3">
+                        <div>
+                          <Label className="mb-1 block">Scan QR</Label>
+                          <div className="p-2 border rounded inline-block bg-white">
+                            <img alt="2FA QR" src={`https://api.qrserver.com/v1/create-qr-code/?size=180x180&data=${encodeURIComponent(twofaOtpAuth)}`} />
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-2">Alternatively, enter the secret manually.</div>
+                        </div>
+                        <div>
+                          <Label className="mb-1 block">Secret</Label>
+                          <div className="text-sm break-all p-2 border rounded bg-muted/30">{twofaSecret}</div>
+                        </div>
+                        <div>
+                          <Label className="mb-1 block">Enter 6-digit code</Label>
+                          <input className="border rounded px-3 py-2 w-full max-w-xs" value={twofaCode} onChange={(e)=> setTwofaCode(e.target.value)} placeholder="123456"/>
+                        </div>
+                        <div>
+                          <Button onClick={async ()=>{
+                            try {
+                              const res = await fetch('/api/2fa/verify', { method:'POST', headers: { 'Content-Type':'application/json', ...authHeaders }, body: JSON.stringify({ code: twofaCode }) });
+                              const data = await res.json();
+                              if (!res.ok) throw new Error(data?.message||'Verification failed');
+                              setTwofaEnabled(true);
+                              toast({ title:'2FA enabled' });
+                            } catch (e:any) { toast({ variant:'destructive', title:'Verification failed', description: e?.message || 'Unknown error' }); }
+                          }}>Verify & Enable</Button>
+                        </div>
+                      </div>
+                    )
+                  )}
+
+                  {twofaMethod === 'otp' && (
                     <div className="space-y-3">
                       <div>
-                        <Label className="mb-1 block">Secret</Label>
-                        <div className="text-sm break-all p-2 border rounded bg-muted/30">{twofaSecret}</div>
-                        <div className="text-xs text-muted-foreground mt-1">Add this to your authenticator app, or use the otpauth URL below.</div>
+                        <Label className="mb-1 block">Contact (Email or Phone)</Label>
+                        <input className="border rounded px-3 py-2 w-full max-w-md" placeholder="patient@example.com or +2557xxxxxxx" value={twofaContact} onChange={(e)=> setTwofaContact(e.target.value)} />
+                        <div className="text-xs text-muted-foreground mt-1">We will send a 6-digit code to this contact.</div>
                       </div>
-                      <div>
-                        <Label className="mb-1 block">otpauth URL</Label>
-                        <div className="text-xs break-all p-2 border rounded bg-muted/30">{twofaOtpAuth}</div>
-                      </div>
-                      <div>
-                        <Label className="mb-1 block">Enter 6-digit code</Label>
-                        <input className="border rounded px-3 py-2 w-full max-w-xs" value={twofaCode} onChange={(e)=> setTwofaCode(e.target.value)} placeholder="123456"/>
-                      </div>
-                      <div>
+                      <div className="flex items-center gap-2">
+                        <Button variant="secondary" onClick={async ()=>{
+                          try {
+                            const headers: Record<string,string> = { 'Content-Type':'application/json', ...authHeaders };
+                            const res = await fetch('/api/2fa/method', { method:'POST', headers, body: JSON.stringify({ method:'otp', contact: twofaContact }) });
+                            const data = await res.json();
+                            if (!res.ok) throw new Error(data?.message||'Failed to set method');
+                            const r2 = await fetch('/api/2fa/otp/request', { method:'POST', headers, body: JSON.stringify({}) });
+                            const d2 = await r2.json();
+                            if (!r2.ok) throw new Error(d2?.message||'Failed to send OTP');
+                            toast({ title:'OTP sent', description:`Check ${d2.channel}: ${d2.to}` });
+                          } catch (e:any) { toast({ variant:'destructive', title:'Failed to send OTP', description: e?.message || 'Unknown error' }); }
+                        }}>Send OTP</Button>
+                        <input className="border rounded px-3 py-2 w-32" placeholder="123456" value={twofaCode} onChange={(e)=> setTwofaCode(e.target.value)} />
                         <Button onClick={async ()=>{
                           try {
-                            const res = await fetch('/api/2fa/verify', { method:'POST', headers: { 'Content-Type':'application/json', ...authHeaders }, body: JSON.stringify({ code: twofaCode }) });
+                            const headers: Record<string,string> = { 'Content-Type':'application/json', ...authHeaders };
+                            const res = await fetch('/api/2fa/otp/verify', { method:'POST', headers, body: JSON.stringify({ code: twofaCode }) });
                             const data = await res.json();
                             if (!res.ok) throw new Error(data?.message||'Verification failed');
                             setTwofaEnabled(true);
-                            toast({ title:'2FA enabled' });
+                            toast({ title:'2FA enabled (OTP)' });
                           } catch (e:any) { toast({ variant:'destructive', title:'Verification failed', description: e?.message || 'Unknown error' }); }
                         }}>Verify & Enable</Button>
                       </div>
