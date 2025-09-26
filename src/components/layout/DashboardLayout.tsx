@@ -5,7 +5,6 @@ import {
   Users, 
   Calendar, 
   FileText, 
-  CreditCard, 
   Settings, 
   LogOut,
   Menu,
@@ -26,9 +25,10 @@ interface DashboardLayoutProps {
   userEmail: string;
   children: React.ReactNode;
   onLogout?: () => void;
+  hideSidebar?: boolean;
 }
 
-const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: DashboardLayoutProps) => {
+const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hideSidebar }: DashboardLayoutProps) => {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState<Array<{id:number; title:string; message:string; created_at?:string}>>([]);
@@ -51,7 +51,6 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
       { icon: Heart, label: "Dashboard", path: dashboardPath },
       { icon: Calendar, label: "Appointments", path: "/appointments" },
       { icon: FileText, label: "Medical Records", path: "/records" },
-      { icon: CreditCard, label: "Billing", path: "/billing" },
       { icon: Bell, label: "Notifications", path: "/notifications" },
     ];
 
@@ -96,6 +95,7 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
   return (
     <div className="flex h-screen bg-background">
       {/* Sidebar */}
+      {!hideSidebar && (
       <div className={cn(
         "flex flex-col bg-card border-r transition-all duration-300",
         sidebarOpen ? "w-64" : "w-16"
@@ -166,19 +166,22 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout }: 
           )}
         </div>
       </div>
+      )}
 
       {/* Main content */}
       <div className="flex-1 flex flex-col">
         {/* Header */}
         <header className="flex items-center justify-between p-4 border-b bg-card">
           <div className="flex items-center gap-4">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setSidebarOpen(!sidebarOpen)}
-            >
-              <Menu className="w-4 h-4" />
-            </Button>
+            {!hideSidebar && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setSidebarOpen(!sidebarOpen)}
+              >
+                <Menu className="w-4 h-4" />
+              </Button>
+            )}
             
             <div className="relative">
               <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-muted-foreground" />

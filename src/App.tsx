@@ -14,9 +14,9 @@ import DashboardLayout from "@/components/layout/DashboardLayout";
 import Appointments from "./pages/Appointments";
 import Patients from "./pages/Patients";
 import MedicalRecords from "./pages/MedicalRecords";
-import Billing from "./pages/Billing";
 import UsersList from "@/components/users/UsersList";
 import { useNavigate } from "react-router-dom";
+import SettingsPage from "@/pages/Settings";
 import Notifications from "@/pages/Notifications";
 
 const queryClient = new QueryClient();
@@ -202,23 +202,7 @@ const App = () => (
               </ProtectedRoute>
             }
           />
-          <Route
-            path="/billing"
-            element={
-              <ProtectedRoute>
-                {(() => {
-                  const u = getAuthUser();
-                  if (!u) return <Navigate to="/" replace />;
-                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
-                  return (
-                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
-                      <Billing />
-                    </DashboardLayout>
-                  );
-                })()}
-              </ProtectedRoute>
-            }
-          />
+          
           <Route
             path="/users"
             element={
@@ -246,7 +230,7 @@ const App = () => (
                   const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
                   return (
                     <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
-                      <div className="p-6"><h1 className="text-2xl font-bold">Settings</h1><p className="text-muted-foreground">Coming soon...</p></div>
+                      <SettingsPage />
                     </DashboardLayout>
                   );
                 })()}

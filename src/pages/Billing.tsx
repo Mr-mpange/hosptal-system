@@ -5,6 +5,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/use-toast";
 import { CardDescription } from "@/components/ui/card";
+// Checkout UI removed per request
 
 interface InvoiceRow {
   id: number;
@@ -34,6 +35,8 @@ const Billing = () => {
   const [error, setError] = useState<string | null>(null);
   const [rows, setRows] = useState<InvoiceRow[]>([]);
   const [metrics, setMetrics] = useState<{ pending:number; paid:number; partially_paid:number; overdue:number; claims:number }|null>(null);
+  const [payMethodById, setPayMethodById] = useState<Record<number,string>>({});
+  // Removed Payment Status and Expired CNs UI state per request
 
   const [loadingPatients, setLoadingPatients] = useState(true);
   const [patientsError, setPatientsError] = useState<string | null>(null);
@@ -50,6 +53,8 @@ const Billing = () => {
     if (!res.ok) throw new Error(data?.message || data?.details || `HTTP ${res.status}`);
     return data;
   };
+
+  // Removed expired CNs loader per request
 
   const loadMetrics = async () => {
     try {
@@ -119,12 +124,39 @@ const Billing = () => {
     }
   };
 
+  // Jobs / Reconcile handlers (used by header buttons)
+  const reconcileNow = async () => {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', ...authHeaders() };
+      const res = await fetch('/api/reconcile/payments', { method: 'POST', headers });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      toast({ title: 'Reconciliation triggered' });
+      await Promise.all([loadInvoices(), loadMetrics()]);
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Reconcile failed', description: e?.message || 'Unknown error' });
+    }
+  };
+
+  const overdueJob = async () => {
+    try {
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', ...authHeaders() };
+      const res = await fetch('/api/jobs/overdue', { method: 'POST', headers });
+      if (!res.ok) { const t = await res.text(); throw new Error(t); }
+      toast({ title: 'Overdue/Expiry job triggered' });
+      await Promise.all([loadInvoices(), loadMetrics()]);
+    } catch (e:any) {
+      toast({ variant:'destructive', title:'Overdue job failed', description: e?.message || 'Unknown error' });
+    }
+  };
+
   const initiate = async (id: number) => {
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json", ...authHeaders() };
-      const res = await fetch(`/api/payments/initiate`, { method: 'POST', headers, body: JSON.stringify({ invoice_id: id, method: 'control' }) });
+      const method = (payMethodById[id] || 'control');
+      const res = await fetch(`/api/payments/initiate`, { method: 'POST', headers, body: JSON.stringify({ invoice_id: id, method }) });
       const p = await parseResponse(res);
-      toast({ title:'Control number generated', description:`Ref: ${p?.reference || 'N/A'}` });
+      const msg = method === 'zenopay' ? 'Zenopay initiated' : 'Control number generated';
+      toast({ title: msg, description:`Ref: ${p?.reference || 'N/A'}` });
     } catch (err: any) {
       toast({ variant:'destructive', title:'Initiate failed', description: err?.message || 'Unknown error' });
     }
@@ -140,6 +172,12 @@ const Billing = () => {
     } catch (e:any) {
       toast({ variant:'destructive', title:'Status check failed', description: e?.message || 'Unknown error' });
     }
+  };
+
+  // Removed payment status poller per request
+
+  const copyRef = async () => {
+    try { if (lastRef) { await navigator.clipboard.writeText(lastRef); toast({ title:'Copied reference' }); } } catch {}
   };
 
   const authHeaders = () => {
@@ -259,6 +297,10 @@ const Billing = () => {
         </div>
       </div>
 
+      {/* Expired CNs UI removed per request */}
+
+      {/* Checkout UI removed per request */}
+
       {/* Invoice Status Metrics */}
       <Card>
         <CardHeader>
@@ -290,6 +332,8 @@ const Billing = () => {
           </div>
         </CardContent>
       </Card>
+
+      {/* Payment Status UI removed per request */}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         <Card className="lg:col-span-2">
@@ -403,7 +447,13 @@ const Billing = () => {
                       <td className="py-2 pr-4 capitalize">{inv.status}</td>
                       <td className="py-2 pr-4 space-x-2">
                         {inv.status === 'pending' && (
-                          <Button size="sm" onClick={() => initiate(inv.id)}>Initiate</Button>
+                          <>
+                            <select className="border rounded h-8 px-2 text-sm mr-2" value={payMethodById[inv.id]||'control'} onChange={(e)=>setPayMethodById(prev=>({ ...prev, [inv.id]: e.target.value }))}>
+                              <option value="control">Control</option>
+                              <option value="zenopay">Zenopay</option>
+                            </select>
+                            <Button size="sm" onClick={() => initiate(inv.id)}>Initiate</Button>
+                          </>
                         )}
                         <Button size="sm" variant="outline" onClick={() => generateCN(inv.id)}>CN Generate</Button>
                         <Button size="sm" variant="outline" onClick={() => listCN(inv.id)}>CN List</Button>

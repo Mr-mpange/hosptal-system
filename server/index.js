@@ -1,12 +1,204 @@
 // ESM Express server with MySQL connection pooling and basic routes.
 // Explicitly load the root .env regardless of where the process is started from.
 import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
+
+// Core server imports and initialization must come BEFORE any route declarations
+import express from 'express';
+import cors from 'cors';
+import { pool } from './mysql.js';
+import { sequelize, initModels, syncSequelize, models } from './sequelize.js';
+import jwt from 'jsonwebtoken';
+import { Op } from 'sequelize';
+import { initiate as zenopayInitiate, verifySignature as zenopayVerify, parseWebhook as zenopayParse } from './providers/zenopay.js';
+
+const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
+app.use(express.json());
+
+// ==== JWT helpers and middleware (must be defined before any route uses them) ====
+const JWT_SECRET = process.env.JWT_SECRET;
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d';
+
+const signToken = (user) => {
+  if (!JWT_SECRET) throw new Error('Server is missing JWT_SECRET');
+  const payload = {
+    sub: String(user.id),
+    role: user.role,
+    email: user.email,
+    name: user.name,
+  };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
+};
+
+// Temporary OTP token (short-lived) for two-step login
+const signTempOtpToken = (userId) => {
+  if (!JWT_SECRET) throw new Error('Server is missing JWT_SECRET');
+  const payload = { sub: String(userId), otp_pending: true };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '10m' });
+};
+
+const requireAuth = (req, res, next) => {
+  try {
+    const auth = req.headers.authorization || '';
+    const parts = auth.split(' ');
+    if (parts.length !== 2 || parts[0] !== 'Bearer') {
+      return res.status(401).json({ message: 'Missing or invalid Authorization header' });
+    }
+    if (!JWT_SECRET) {
+      return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
+    }
+    const decoded = jwt.verify(parts[1], JWT_SECRET);
+    req.user = decoded; // { sub, role, email, name, iat, exp }
+    next();
+  } catch (err) {
+    console.error('Auth error:', err?.message || err);
+    return res.status(401).json({ message: 'Unauthorized' });
+  }
+};
+
+const requireRole = (...roles) => (req, res, next) => {
+  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
+  if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'Forbidden' });
+  next();
+};
+
+// ===== Simple file-backed settings =====
+const settingsPath = path.resolve(__dirname, 'settings.json');
+function loadSettings() {
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const raw = fs.readFileSync(settingsPath, 'utf8');
+      return JSON.parse(raw || '{}');
+    }
+  } catch {}
+  return {
+    application: {
+      app_name: 'CareLink HMS',
+      logo_url: '/src/assets/logo.png',
+      primary_color: '#0ea5e9',
+      secondary_color: '#334155',
+    },
+    billing: {
+      enable_push_to_pay: true,
+      default_mobile_provider: 'mpesa',
+      default_bank_provider: 'crdb',
+      allow_amount_override: true,
+    },
+    notifications: {
+      role_scoped: true,
+    },
+  };
+}
+function saveSettings(obj) {
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(obj, null, 2), 'utf8');
+    return true;
+  } catch (e) { return false; }
+}
+
+// (moved) Settings endpoints are registered after middleware below
+
+// List payments (optionally by invoice_id)
+app.get('/api/payments', requireAuth, async (req, res) => {
+  try {
+    const where = {};
+    if (req.query.invoice_id) where.invoice_id = Number(req.query.invoice_id);
+    const limit = Math.min(100, Number(req.query.limit||10));
+    const rows = await models.Payment.findAll({ where, order: [['id','DESC']], limit });
+    res.json(rows);
+  } catch (err) {
+    console.error('/api/payments GET error:', err);
+    res.status(500).json({ message: 'Fetch payments failed', details: toDbMessage(err) });
+  }
+});
+
+// Push-to-pay: sends a payment prompt to user's phone (simulated)
+app.post('/api/payments/push', requireAuth, requireRole('admin','manager','doctor'), async (req, res) => {
+  try {
+    const { invoice_id, provider, phone, amount } = req.body || {};
+    const invId = Number(invoice_id);
+    if (!invId) return res.status(400).json({ message: 'invoice_id required' });
+    if (!provider) return res.status(400).json({ message: 'provider required' });
+    if (!phone) return res.status(400).json({ message: 'phone required' });
+    const inv = await models.Invoice.findByPk(invId);
+    if (!inv) return res.status(404).json({ message: 'Invoice not found' });
+    const amt = amount != null ? Number(amount) : Number(inv.amount);
+    if (!(amt > 0)) return res.status(400).json({ message: 'amount must be > 0' });
+    if (amt > Number(inv.amount)) return res.status(400).json({ message: 'amount cannot exceed invoice amount' });
+    const reference = `PUSH-${invId}-${Date.now()}`;
+    const row = await models.Payment.create({
+      invoice_id: invId,
+      patient_id: inv.patient_id,
+      amount: amt,
+      method: 'mobile_money',
+      status: 'initiated',
+      reference,
+      meta: { provider: String(provider), phone: String(phone) }
+    });
+    // In a real integration, call the provider API here to push STK/USSD prompt to phone.
+    res.status(201).json(row);
+  } catch (err) {
+    console.error('/api/payments/push POST error:', err);
+    res.status(500).json({ message: 'Push payment failed', details: toDbMessage(err) });
+  }
+});
+
+// Look up latest payment by reference
+app.get('/api/payments/status/:reference', requireAuth, async (req, res) => {
+  try {
+    const reference = String(req.params.reference);
+    const rows = await models.Payment.findAll({ where: { reference }, order: [['id','DESC']], limit: 1 });
+    res.json(rows[0] || null);
+  } catch (err) {
+    console.error('/api/payments/status GET error:', err);
+    res.status(500).json({ message: 'Fetch status failed', details: toDbMessage(err) });
+  }
+});
+
+// Zenopay webhook
+app.post('/api/webhooks/zenopay', async (req, res) => {
+  try {
+    if (!zenopayVerify(req)) return res.status(401).json({ message: 'invalid signature' });
+    const p = zenopayParse(req.body||{});
+    if (!p.reference) return res.status(400).json({ message: 'reference required' });
+    // Try match by control number first if provided else by reference
+    let cn = null;
+    if (p.control_number) cn = await models.ControlNumber.findOne({ where: { number: p.control_number } });
+    let invoiceId = cn ? cn.invoice_id : null;
+    if (!invoiceId) {
+      const payment = await models.Payment.findOne({ where: { reference: p.reference } });
+      invoiceId = payment?.invoice_id || null;
+    }
+    if (!invoiceId) return res.status(404).json({ message: 'invoice not found for reference' });
+    await models.Payment.create({ invoice_id: invoiceId, patient_id: null, amount: p.amount, method: 'zenopay', status: p.status==='success'?'success':'failed', reference: p.reference, provider_tx_id: p.provider_tx_id||null, meta: req.body||null });
+    if (p.status==='success') {
+      if (cn) {
+        const newRemain = Math.max(0, Number(cn.remaining_balance||0) - Number(p.amount||0));
+        await cn.update({ remaining_balance: newRemain });
+        if (newRemain === 0) await models.Invoice.update({ status: 'paid' }, { where: { id: invoiceId } });
+        else await models.Invoice.update({ status: 'partially_paid' }, { where: { id: invoiceId } });
+      } else {
+        // If no CN, still mark invoice based on payments sum
+        const pays = await models.Payment.findAll({ where: { invoice_id: invoiceId, status: 'success' }, attributes: ['amount'] });
+        const paid = pays.reduce((s,r)=>s+Number(r.amount||0),0) + Number(p.amount||0);
+        const inv = await models.Invoice.findByPk(invoiceId);
+        if (paid >= Number(inv.amount||0)) await models.Invoice.update({ status:'paid' }, { where: { id: invoiceId } });
+        else await models.Invoice.update({ status:'partially_paid' }, { where: { id: invoiceId } });
+      }
+    }
+    res.json({ ok: true });
+  } catch (err) { console.error('zenopay webhook error', err); res.status(500).json({ message: 'error' }); }
+});
 
 // ===== Overdue/Expiry job =====
 app.post('/api/jobs/overdue', requireAuth, requireRole('admin','manager'), async (_req, res) => {
@@ -168,7 +360,7 @@ app.post('/api/webhooks/mobile-money', async (req, res) => {
     const cn = await models.ControlNumber.findOne({ where: { number: String(control_number) } });
     if (!cn) return res.status(404).json({ message: 'Control number not found' });
     const amt = Number(amount||0);
-    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'mobile_money', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: null });
+    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'mobile_money', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: req.body || null });
     if (status==='success') {
       const newRemain = Math.max(0, Number(cn.remaining_balance||0) - amt);
       await cn.update({ remaining_balance: newRemain });
@@ -190,7 +382,7 @@ app.post('/api/webhooks/bank', async (req, res) => {
     const cn = await models.ControlNumber.findOne({ where: { number: String(control_number) } });
     if (!cn) return res.status(404).json({ message: 'Control number not found' });
     const amt = Number(amount||0);
-    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'bank_transfer', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: null });
+    await models.Payment.create({ invoice_id: cn.invoice_id, patient_id: null, amount: amt, method: 'bank_transfer', status: status==='success'?'success':'failed', reference: control_number, provider_tx_id: provider_tx_id||null, meta: req.body || null });
     if (status==='success') {
       const newRemain = Math.max(0, Number(cn.remaining_balance||0) - amt);
       await cn.update({ remaining_balance: newRemain });
@@ -220,6 +412,15 @@ app.post('/api/reconcile/payments', requireAuth, requireRole('admin','manager'),
           await cn.update({ remaining_balance: newRemain });
           if (newRemain === 0) await models.Invoice.update({ status: 'paid' }, { where: { id: p.invoice_id } });
           else await models.Invoice.update({ status: 'partially_paid' }, { where: { id: p.invoice_id } });
+        } else {
+          // No control number: update invoice status based on paid sum
+          const pays = await models.Payment.findAll({ where: { invoice_id: p.invoice_id, status: 'success' }, attributes: ['amount'] });
+          const paid = pays.reduce((s,r)=> s + Number(r.amount||0), 0);
+          const inv = await models.Invoice.findByPk(p.invoice_id);
+          if (inv) {
+            if (paid >= Number(inv.amount||0)) await models.Invoice.update({ status: 'paid' }, { where: { id: p.invoice_id } });
+            else await models.Invoice.update({ status: 'partially_paid' }, { where: { id: p.invoice_id } });
+          }
         }
       }
     }
@@ -262,14 +463,45 @@ app.patch('/api/inventory/:id', requireAuth, requireRole('admin','manager'), asy
 // ===== Payments (initiate and status) =====
 app.post('/api/payments/initiate', requireAuth, async (req, res) => {
   try {
-    const { invoice_id, method } = req.body || {};
+    const { invoice_id, method, buyer_name: bName, buyer_phone: bPhone, buyer_email: bEmail, provider: reqProvider, amount: reqAmount } = req.body || {};
     const invId = Number(invoice_id);
     if (!invId) return res.status(400).json({ message: 'invoice_id required' });
     const inv = await models.Invoice.findByPk(invId);
     if (!inv) return res.status(404).json({ message: 'Invoice not found' });
-    const reference = `CN-${invId}-${Date.now()}`;
-    const row = await models.Payment.create({ invoice_id: invId, patient_id: inv.patient_id, amount: inv.amount, method: method || 'control', status: 'initiated', reference });
-    res.status(201).json(row);
+    // Amount validation (allow override but not more than invoice amount, and >0)
+    const amt = reqAmount != null ? Number(reqAmount) : Number(inv.amount);
+    if (!(amt > 0)) return res.status(400).json({ message: 'amount must be > 0' });
+    if (amt > Number(inv.amount)) return res.status(400).json({ message: 'amount cannot exceed invoice amount' });
+    // default control-number style reference
+    let reference = `CN-${invId}-${Date.now()}`;
+    let checkout_url = undefined;
+    let payMethod = method || 'control';
+    if (String(method).toLowerCase() === 'zenopay') {
+      // Pull buyer info from patient record but allow override from request body
+      let buyer_name = bName, buyer_phone = bPhone, buyer_email = bEmail;
+      try {
+        if (!buyer_name || !buyer_phone || !buyer_email) {
+          const p = await models.Patient.findByPk(inv.patient_id);
+          if (p) {
+            if (!buyer_name) buyer_name = p.name || undefined;
+            if (!buyer_phone) buyer_phone = p.phone || undefined;
+            if (!buyer_email) buyer_email = p.email || undefined;
+          }
+        }
+      } catch {}
+      const z = await zenopayInitiate({ invoiceId: invId, amount: amt, controlNumber: reference, buyer_name, buyer_phone, buyer_email });
+      reference = z.reference || reference;
+      checkout_url = z.checkout_url;
+      payMethod = 'zenopay';
+    }
+    const meta = {};
+    if (checkout_url) meta.checkout_url = checkout_url;
+    if (reqProvider) meta.provider = String(reqProvider);
+    if (bName) meta.buyer_name = String(bName);
+    if (bPhone) meta.buyer_phone = String(bPhone);
+    if (bEmail) meta.buyer_email = String(bEmail);
+    const row = await models.Payment.create({ invoice_id: invId, patient_id: inv.patient_id, amount: amt, method: payMethod, status: 'initiated', reference, meta: Object.keys(meta).length ? meta : null });
+    res.status(201).json({ ...row.toJSON(), checkout_url });
   } catch (err) {
     console.error('/api/payments/initiate POST error:', err);
     res.status(500).json({ message: 'Initiate payment failed', details: toDbMessage(err) });
@@ -296,6 +528,39 @@ app.get('/api/payments/:id', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('/api/payments/:id GET error:', err);
     res.status(500).json({ message: 'Fetch payment failed', details: toDbMessage(err) });
+  }
+});
+
+// Simple HTML receipt (for printing)
+app.get('/api/payments/:id/receipt', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const pay = await models.Payment.findByPk(id);
+    if (!pay) return res.status(404).send('Payment not found');
+    const inv = await models.Invoice.findByPk(pay.invoice_id);
+    const cn = await models.ControlNumber.findOne({ where: { invoice_id: pay.invoice_id }, order: [['id','DESC']] });
+    const dt = new Date(pay.created_at || Date.now()).toLocaleString();
+    const html = `<!DOCTYPE html><html><head><meta charset="utf-8"/><title>Receipt #${id}</title>
+    <style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;padding:24px;color:#111}h1{margin:0 0 8px}table{border-collapse:collapse;margin-top:12px}td{padding:4px 8px}small{color:#555}</style></head><body>
+    <h1>Payment Receipt</h1>
+    <small>Secure Payment • ${dt}</small>
+    <table>
+      <tr><td><b>Payment ID</b></td><td>#${id}</td></tr>
+      <tr><td><b>Invoice ID</b></td><td>#${pay.invoice_id}</td></tr>
+      <tr><td><b>Amount</b></td><td>${pay.amount}</td></tr>
+      <tr><td><b>Status</b></td><td>${pay.status}</td></tr>
+      <tr><td><b>Method</b></td><td>${pay.method}</td></tr>
+      <tr><td><b>Reference</b></td><td>${pay.reference || ''}</td></tr>
+      <tr><td><b>Control Number</b></td><td>${cn?.number || ''}</td></tr>
+      <tr><td><b>Timestamp</b></td><td>${dt}</td></tr>
+    </table>
+    <p style="margin-top:16px"><small>For support contact your billing office.</small></p>
+    </body></html>`;
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.send(html);
+  } catch (err) {
+    console.error('/api/payments/:id/receipt GET error:', err);
+    res.status(500).send('Failed to generate receipt');
   }
 });
 
@@ -401,59 +666,122 @@ app.get('/api/reports/admissions.csv', requireAuth, requireRole('admin','manager
     res.status(500).json({ message: 'Generate admissions CSV failed', details: toDbMessage(err) });
   }
 });
-import express from 'express';
-import cors from 'cors';
-import { pool } from './mysql.js';
-import { sequelize, initModels, syncSequelize, models } from './sequelize.js';
-import jwt from 'jsonwebtoken';
-import { Op } from 'sequelize';
-import crypto from 'crypto';
 
-const app = express();
-const PORT = process.env.PORT || 5000;
 
-app.use(cors());
-app.use(express.json());
-
-// ==== JWT helpers and middleware (must be defined before any route uses them) ====
-const JWT_SECRET = process.env.JWT_SECRET;
-const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '1d';
-
-const signToken = (user) => {
-  if (!JWT_SECRET) throw new Error('Server is missing JWT_SECRET');
-  const payload = {
-    sub: String(user.id),
-    role: user.role,
-    email: user.email,
-    name: user.name,
-  };
-  return jwt.sign(payload, JWT_SECRET, { expiresIn: JWT_EXPIRES_IN });
-};
-
-const requireAuth = (req, res, next) => {
+// Settings endpoints (registered post-middleware)
+app.get('/api/settings', requireAuth, requireRole('admin','manager'), async (_req, res) => {
+  try { res.json(loadSettings()); } catch (e) { res.status(500).json({ message: 'Failed to load settings' }); }
+});
+app.put('/api/settings', requireAuth, requireRole('admin'), async (req, res) => {
   try {
-    const auth = req.headers.authorization || '';
-    const parts = auth.split(' ');
-    if (parts.length !== 2 || parts[0] !== 'Bearer') {
-      return res.status(401).json({ message: 'Missing or invalid Authorization header' });
-    }
-    if (!JWT_SECRET) {
-      return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
-    }
-    const decoded = jwt.verify(parts[1], JWT_SECRET);
-    req.user = decoded; // { sub, role, email, name, iat, exp }
-    next();
-  } catch (err) {
-    console.error('Auth error:', err?.message || err);
-    return res.status(401).json({ message: 'Unauthorized' });
-  }
-};
+    const current = loadSettings();
+    const next = { ...current, ...(req.body||{}) };
+    if (!saveSettings(next)) return res.status(500).json({ message: 'Failed to save settings' });
+    res.json(next);
+  } catch (e) { res.status(500).json({ message: 'Failed to save settings' }); }
+});
 
-const requireRole = (...roles) => (req, res, next) => {
-  if (!req.user) return res.status(401).json({ message: 'Unauthorized' });
-  if (!roles.includes(req.user.role)) return res.status(403).json({ message: 'Forbidden' });
-  next();
-};
+// ===== Simple file-backed 2FA (TOTP) =====
+const twoFaPath = path.resolve(__dirname, '2fa.json');
+function load2fa() {
+  try { if (fs.existsSync(twoFaPath)) return JSON.parse(fs.readFileSync(twoFaPath,'utf8')||'{}'); } catch {}
+  return {};
+}
+function save2fa(obj) { try { fs.writeFileSync(twoFaPath, JSON.stringify(obj,null,2),'utf8'); return true; } catch { return false; } }
+// Base32 helpers
+const base32Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+function base32Encode(buf) {
+  let bits = 0, value = 0, output = '';
+  for (let i = 0; i < buf.length; i++) {
+    value = (value << 8) | buf[i];
+    bits += 8;
+    while (bits >= 5) {
+      output += base32Alphabet[(value >>> (bits - 5)) & 31];
+      bits -= 5;
+    }
+  }
+  if (bits > 0) output += base32Alphabet[(value << (5 - bits)) & 31];
+  return output;
+}
+function base32Decode(str) {
+  let bits = 0, value = 0; const out = [];
+  for (const c of str.replace(/=+$/,'')) {
+    const idx = base32Alphabet.indexOf(c.toUpperCase());
+    if (idx === -1) continue;
+    value = (value << 5) | idx; bits += 5;
+    if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+  }
+  return Buffer.from(out);
+}
+function hotp(secretBase32, counter, digits=6) {
+  const key = base32Decode(secretBase32);
+  const buf = Buffer.alloc(8);
+  for (let i=7;i>=0;i--) { buf[i] = counter & 0xff; counter = counter >>> 8; }
+  const hmac = crypto.createHmac('sha1', key).update(buf).digest();
+  const offset = hmac[hmac.length-1] & 0x0f;
+  const code = ((hmac[offset] & 0x7f) << 24) | ((hmac[offset+1] & 0xff) << 16) | ((hmac[offset+2] & 0xff) << 8) | (hmac[offset+3] & 0xff);
+  const mod = code % (10 ** digits);
+  return String(mod).padStart(digits,'0');
+}
+function totp(secretBase32, period=30, digits=6, skew=1) {
+  const now = Math.floor(Date.now() / 1000);
+  const steps = Math.floor(now / period);
+  const codes = [];
+  for (let k=-skew; k<=skew; k++) {
+    codes.push(hotp(secretBase32, steps + k, digits));
+  }
+  return codes;
+}
+
+// 2FA endpoints
+app.get('/api/2fa/status', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    const row = await models.User2FA.findByPk(userId);
+    res.json({ enabled: !!row?.enabled });
+  } catch (e) { res.status(500).json({ message: 'Failed' }); }
+});
+app.post('/api/2fa/setup', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    const secretBuf = crypto.randomBytes(20);
+    const secret = base32Encode(secretBuf);
+    const issuer = encodeURIComponent((process.env.APP_NAME || 'CareLink HMS'));
+    const label = encodeURIComponent(`${issuer}:${req.user?.email || String(userId)}`);
+    const otpauth = `otpauth://totp/${label}?secret=${secret}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+    // Save or update DB record with temp secret (enabled=false until verified)
+    const existing = await models.User2FA.findByPk(userId);
+    if (existing) await existing.update({ totp_secret: secret, enabled: false });
+    else await models.User2FA.create({ user_id: userId, totp_secret: secret, enabled: false });
+    res.json({ secret, otpauth });
+  } catch (e) { res.status(500).json({ message: 'Setup failed' }); }
+});
+app.post('/api/2fa/verify', requireAuth, async (req, res) => {
+  try {
+    const { code } = req.body || {};
+    if (!code) return res.status(400).json({ message: 'code required' });
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    const rec = await models.User2FA.findByPk(userId);
+    const secret = rec?.totp_secret;
+    if (!secret) return res.status(400).json({ message: 'No secret set' });
+    const validCodes = totp(secret);
+    const ok = validCodes.includes(String(code));
+    if (!ok) return res.status(400).json({ message: 'Invalid code' });
+    await models.User2FA.upsert({ user_id: userId, totp_secret: secret, enabled: true });
+    res.json({ enabled: true });
+  } catch (e) { res.status(500).json({ message: 'Verify failed' }); }
+});
+app.post('/api/2fa/disable', requireAuth, async (req, res) => {
+  try {
+    const userId = Number(req.user?.sub || req.user?.id || 0);
+    if (!userId) return res.status(400).json({ message: 'Invalid user' });
+    await models.User2FA.destroy({ where: { user_id: userId } });
+    res.json({ enabled: false });
+  } catch (e) { res.status(500).json({ message: 'Disable failed' }); }
+});
 
 // Tiny logger for debugging
 app.use((req, _res, next) => {
@@ -507,14 +835,48 @@ app.post('/api/login', async (req, res) => {
     const bcrypt = (await import('bcryptjs')).default;
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: 'Invalid credentials' });
+    // If user has 2FA enabled, require OTP second step
+    let requires_otp = false;
+    try {
+      const rec = await models.User2FA.findByPk(Number(user.id));
+      requires_otp = !!rec?.enabled;
+    } catch {}
+    if (requires_otp) {
+      const temp_token = signTempOtpToken(user.id);
+      return res.json({ requires_otp: true, temp_token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    }
     const token = signToken(user);
-    return res.json({
-      token,
-      user: { id: user.id, name: user.name, email: user.email, role: user.role },
-    });
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (err) {
     console.error('/api/login error:', err);
     return res.status(500).json({ message: 'Login failed', details: toDbMessage(err) });
+  }
+});
+
+// Verify OTP for two-step login
+app.post('/api/login/verify-otp', async (req, res) => {
+  try {
+    const { temp_token, code } = req.body || {};
+    if (!temp_token || !code) return res.status(400).json({ message: 'temp_token and code required' });
+    if (!JWT_SECRET) return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
+    let decoded = null;
+    try { decoded = jwt.verify(String(temp_token), JWT_SECRET); } catch (e) { return res.status(401).json({ message: 'Invalid or expired temp token' }); }
+    if (!decoded?.sub || !decoded?.otp_pending) return res.status(400).json({ message: 'Invalid temp token' });
+    const userId = Number(decoded.sub);
+    const [rows] = await pool.query('SELECT id, name, email, role FROM users WHERE id = ? LIMIT 1', [userId]);
+    const user = rows && rows[0];
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    const rec = await models.User2FA.findByPk(userId);
+    const secret = rec?.totp_secret;
+    if (!secret || !rec?.enabled) return res.status(400).json({ message: '2FA not enabled' });
+    const validCodes = totp(secret);
+    const ok = validCodes.includes(String(code));
+    if (!ok) return res.status(400).json({ message: 'Invalid code' });
+    const token = signToken(user);
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (err) {
+    console.error('/api/login/verify-otp error:', err);
+    return res.status(500).json({ message: 'Verify OTP failed', details: toDbMessage(err) });
   }
 });
 

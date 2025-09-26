@@ -14,6 +14,7 @@ const { pool } = require("./mysql.cjs");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -26,6 +27,40 @@ app.use((req, _res, next) => {
   console.log(`[api] ${req.method} ${req.url}`);
   next();
 });
+
+// ===== Simple file-backed settings =====
+const settingsPath = path.resolve(__dirname, 'settings.json');
+function loadSettings() {
+  try {
+    if (fs.existsSync(settingsPath)) {
+      const raw = fs.readFileSync(settingsPath, 'utf8');
+      return JSON.parse(raw || '{}');
+    }
+  } catch {}
+  return {
+    application: {
+      app_name: 'CareLink HMS',
+      logo_url: '/src/assets/logo.png',
+      primary_color: '#0ea5e9',
+      secondary_color: '#334155',
+    },
+    billing: {
+      enable_push_to_pay: true,
+      default_mobile_provider: 'mpesa',
+      default_bank_provider: 'crdb',
+      allow_amount_override: true,
+    },
+    notifications: {
+      role_scoped: true,
+    },
+  };
+}
+function saveSettings(obj) {
+  try {
+    fs.writeFileSync(settingsPath, JSON.stringify(obj, null, 2), 'utf8');
+    return true;
+  } catch { return false; }
+}
 
 // Occupancy metrics (beds by department)
 app.get('/api/metrics/occupancy', requireAuth, async (req, res) => {
@@ -316,6 +351,19 @@ const requireRole = (roles = []) => (req, res, next) => {
   if (!roles.includes(role)) return res.status(403).json({ message: 'Forbidden' });
   next();
 };
+
+// ===== Settings endpoints =====
+app.get('/api/settings', requireAuth, requireRole(['admin','manager']), (req, res) => {
+  try { res.json(loadSettings()); } catch { res.status(500).json({ message: 'Failed to load settings' }); }
+});
+app.put('/api/settings', requireAuth, requireRole(['admin']), (req, res) => {
+  try {
+    const current = loadSettings();
+    const next = { ...current, ...(req.body||{}) };
+    if (!saveSettings(next)) return res.status(500).json({ message: 'Failed to save settings' });
+    res.json(next);
+  } catch { res.status(500).json({ message: 'Failed to save settings' }); }
+});
 
 // Audit helper
 async function audit(userId, action, entity, entityId = null, meta = null) {
