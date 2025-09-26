@@ -307,6 +307,7 @@ export async function initModels() {
     user_id: { type: DataTypes.INTEGER.UNSIGNED, allowNull: false },
     channel: { type: DataTypes.ENUM('email','sms'), allowNull: false },
     code: { type: DataTypes.STRING(12), allowNull: false },
+    provider_ref: { type: DataTypes.STRING(160), allowNull: true },
     expires_at: { type: DataTypes.DATE, allowNull: false },
     used_at: { type: DataTypes.DATE, allowNull: true },
     created_at: { type: DataTypes.DATE, allowNull: true, defaultValue: Sequelize.literal('CURRENT_TIMESTAMP') },

@@ -1,0 +1,17 @@
+{
+  "application": {
+    "app_name": "",
+    "logo_url": "/src/assets/logo.png",
+    "primary_color": "#0ea5e9",
+    "secondary_color": "#334155"
+  },
+  "billing": {
+    "enable_push_to_pay": false,
+    "default_mobile_provider": "mpesa",
+    "default_bank_provider": "other",
+    "allow_amount_override": false
+  },
+  "notifications": {
+    "role_scoped": true
+  }
+}

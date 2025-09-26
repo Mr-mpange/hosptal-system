@@ -15,10 +15,16 @@ const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 require("dotenv").config();
 const fs = require('fs');
+const { pathToFileURL } = require('url');
 
 const app = express();
 const PORT = process.env.PORT || 5000;
 const JWT_SECRET = process.env.JWT_SECRET || "dev-secret-change-me";
+function signTempOtpToken(userId) {
+  if (!JWT_SECRET) throw new Error('Server missing JWT_SECRET');
+  const payload = { sub: String(userId), otp_pending: true };
+  return jwt.sign(payload, JWT_SECRET, { expiresIn: '10m' });
+}
 
 app.use(cors());
 app.use(express.json());
@@ -27,6 +33,26 @@ app.use((req, _res, next) => {
   console.log(`[api] ${req.method} ${req.url}`);
   next();
 });
+
+// ===== Initialize Sequelize models from ESM module =====
+let __sequelizeMods = null;
+async function getSequelize() {
+  if (!__sequelizeMods) {
+    const url = pathToFileURL(path.resolve(__dirname, './sequelize.js')).href;
+    __sequelizeMods = await import(url);
+  }
+  return __sequelizeMods;
+}
+(async () => {
+  try {
+    const { initModels, syncSequelize } = await getSequelize();
+    await initModels();
+    await syncSequelize();
+    console.log('[sequelize] models ready');
+  } catch (e) {
+    console.error('[sequelize] init error:', e?.message || e);
+  }
+})();
 
 // ===== Simple file-backed settings =====
 const settingsPath = path.resolve(__dirname, 'settings.json');
@@ -365,6 +391,99 @@ app.put('/api/settings', requireAuth, requireRole(['admin']), (req, res) => {
   } catch { res.status(500).json({ message: 'Failed to save settings' }); }
 });
 
+// ===== 2FA (Sequelize-backed) for CJS server =====
+function normalizeMsisdn(msisdn){ const s=String(msisdn||'').replace(/\s+/g,''); if(s.startsWith('+')) return s; if(s.startsWith('0')) return `+255${s.slice(1)}`; if(/^255\d+$/.test(s)) return `+${s}`; return s; }
+
+// Status
+app.get('/api/2fa/status', requireAuth, async (req,res)=>{
+  try {
+    const { models } = await getSequelize();
+    const rec = await models.User2FA.findByPk(Number(req.user.id));
+    res.json({ enabled: !!rec?.enabled, method: rec?.method||null, contact: rec?.contact||null });
+  } catch (e) { res.status(500).json({ message: 'Failed' }); }
+});
+
+// Set method/contact
+app.post('/api/2fa/method', requireAuth, async (req,res)=>{
+  try {
+    const { models } = await getSequelize();
+    const userId = Number(req.user.id);
+    const method = String(req.body?.method||'').toLowerCase();
+    const contact = req.body?.contact ? String(req.body.contact) : null;
+    if (!['totp','otp'].includes(method)) return res.status(400).json({ message: 'Invalid method' });
+    if (method==='otp' && !contact) return res.status(400).json({ message: 'contact required for otp' });
+    const ex = await models.User2FA.findByPk(userId);
+    if (ex) await ex.update({ method, contact: contact||null, enabled: false });
+    else await models.User2FA.create({ user_id: userId, method, contact: contact||null, enabled: false });
+    res.json({ ok: true });
+  } catch { res.status(500).json({ message: 'Failed to set method' }); }
+});
+
+// Request OTP (email via SendGrid, sms via Briq OTP API)
+app.post('/api/2fa/otp/request', requireAuth, async (req,res)=>{
+  try {
+    const { models } = await getSequelize();
+    const userId = Number(req.user.id);
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      const code = String(Math.floor(100000 + Math.random()*900000));
+      const expires = new Date(Date.now() + 5*60*1000);
+      await models.UserOTP.create({ user_id: userId, channel: 'email', code, expires_at: expires });
+      const SG_KEY = process.env.SENDGRID_API_KEY; const FROM = process.env.SENDGRID_FROM_EMAIL; const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Clinicare HMS';
+      if (!SG_KEY || !FROM) return res.status(500).json({ message: 'Email OTP not configured' });
+      const payload = { personalizations:[{ to:[{ email: rec.contact }] }], from:{ email: FROM, name: FROM_NAME }, subject:'Your verification code', content:[{ type:'text/plain', value:`Your verification code is ${code}. It expires in 5 minutes.` }] };
+      const r = await fetch('https://api.sendgrid.com/v3/mail/send', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${SG_KEY}` }, body: JSON.stringify(payload) });
+      if (!r.ok) { const t = await r.text(); return res.status(500).json({ message:'Failed to send OTP (email)', details:t }); }
+      return res.json({ sent:true, channel:'email', to: rec.contact });
+    } else {
+      const API_KEY = process.env.BRIQ_API_KEY; const DEV_APP = process.env.BRIQ_DEVELOPER_APP_ID; const BASE = (process.env.BRIQ_OTP_BASE_URL||process.env.BRIQ_BASE_URL||'https://api.briq.tz').replace(/\/$/,'');
+      if (!API_KEY || !DEV_APP) return res.status(500).json({ message: 'SMS OTP not configured' });
+      const body = { phone_number: normalizeMsisdn(rec.contact), developer_app_id: DEV_APP };
+      const r = await fetch(`${BASE}/otp/request`, { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${API_KEY}` }, body: JSON.stringify(body) });
+      let data=null; try{ data=await r.json(); } catch{ data=await r.text(); }
+      if (!r.ok || (data && data.success===false)) return res.status(500).json({ message: 'Failed to send OTP (sms)', details: (data && (data.error||data.message)) || data });
+      return res.json({ sent:true, channel:'sms', to: rec.contact });
+    }
+  } catch (e) { res.status(500).json({ message: 'OTP request failed' }); }
+});
+
+// Verify OTP (email local, sms via Briq)
+app.post('/api/2fa/otp/verify', requireAuth, async (req,res)=>{
+  try {
+    const { models } = await getSequelize();
+    const userId = Number(req.user.id);
+    const code = String(req.body?.code||'').trim(); if (!code) return res.status(400).json({ message: 'code required' });
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      const now = new Date();
+      const row = await models.UserOTP.findOne({ where: { user_id: userId, channel: 'email', code, used_at: null, expires_at: { ['gt']: now } }, order: [['id','DESC']] });
+      // NOTE: Using raw condition due to lack of Op in CJS; fallback to manual check
+      // If the above condition fails due to ['gt'], fallback query:
+      if (!row) {
+        const candidates = await models.UserOTP.findAll({ where: { user_id: userId, channel: 'email', code, used_at: null }, order: [['id','DESC']], limit: 3 });
+        const valid = candidates.find(r => new Date(r.expires_at) > new Date());
+        if (!valid) return res.status(400).json({ message: 'Invalid or expired code' });
+        await valid.update({ used_at: new Date() });
+      } else {
+        await row.update({ used_at: new Date() });
+      }
+    } else {
+      const API_KEY = process.env.BRIQ_API_KEY; const DEV_APP = process.env.BRIQ_DEVELOPER_APP_ID; const BASE = (process.env.BRIQ_OTP_BASE_URL||process.env.BRIQ_BASE_URL||'https://api.briq.tz').replace(/\/$/,'');
+      if (!API_KEY || !DEV_APP) return res.status(500).json({ message: 'SMS OTP not configured' });
+      const body = { phone_number: normalizeMsisdn(rec.contact), code: String(code), developer_app_id: DEV_APP };
+      const r = await fetch(`${BASE}/otp/validate`, { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${API_KEY}` }, body: JSON.stringify(body) });
+      let data=null; try{ data=await r.json(); } catch{ data=await r.text(); }
+      if (!r.ok || (data && data.success===false)) return res.status(400).json({ message: 'Invalid code', details: (data && (data.error||data.message)) || data });
+    }
+    if (rec) await rec.update({ method:'otp', enabled:true }); else await models.User2FA.create({ user_id: userId, method:'otp', enabled:true });
+    res.json({ enabled:true, method:'otp' });
+  } catch (e) { res.status(500).json({ message: 'OTP verify failed' }); }
+});
+
 // Audit helper
 async function audit(userId, action, entity, entityId = null, meta = null) {
   try {
@@ -402,9 +521,92 @@ app.post('/api/login', async (req, res) => {
     const user = rows[0];
     const ok = await bcrypt.compare(password, user.password_hash);
     if (!ok) return res.status(401).json({ message: 'Invalid email or password' });
+    // 2FA check via Sequelize
+    try {
+      const { models } = await getSequelize();
+      const rec = await models.User2FA.findByPk(Number(user.id));
+      if (rec && rec.enabled) {
+        const temp_token = signTempOtpToken(user.id);
+        return res.json({ requires_otp: true, temp_token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+      }
+    } catch {}
     const token = jwt.sign({ id: user.id, name: user.name, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
   } catch (e) { res.status(500).json({ message: 'Login failed' }); }
+});
+
+// Request OTP during two-step login
+app.post('/api/login/otp/request', async (req, res) => {
+  try {
+    const { temp_token } = req.body || {};
+    if (!temp_token) return res.status(400).json({ message: 'temp_token required' });
+    let decoded=null; try { decoded = jwt.verify(String(temp_token), JWT_SECRET); } catch { return res.status(401).json({ message: 'Invalid or expired temp token' }); }
+    if (!decoded?.sub || !decoded?.otp_pending) return res.status(400).json({ message: 'Invalid temp token' });
+    const userId = Number(decoded.sub);
+    const { models } = await getSequelize();
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      const code = String(Math.floor(100000 + Math.random()*900000));
+      const expires = new Date(Date.now() + 5*60*1000);
+      await models.UserOTP.create({ user_id: userId, channel: 'email', code, expires_at: expires });
+      const SG_KEY = process.env.SENDGRID_API_KEY; const FROM = process.env.SENDGRID_FROM_EMAIL; const FROM_NAME = process.env.SENDGRID_FROM_NAME || 'Clinicare HMS';
+      if (!SG_KEY || !FROM) return res.status(500).json({ message: 'Email OTP not configured' });
+      const payload = { personalizations:[{ to:[{ email: rec.contact }] }], from:{ email: FROM, name: FROM_NAME }, subject:'Your login code', content:[{ type:'text/plain', value:`Your login code is ${code}. It expires in 5 minutes.` }] };
+      const r = await fetch('https://api.sendgrid.com/v3/mail/send', { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${SG_KEY}` }, body: JSON.stringify(payload) });
+      if (!r.ok) { const t=await r.text(); return res.status(500).json({ message:'Failed to send OTP (email)', details:t }); }
+      return res.json({ sent: true, channel: 'email', to: rec.contact });
+    } else {
+      const API_KEY = process.env.BRIQ_API_KEY; const DEV_APP = process.env.BRIQ_DEVELOPER_APP_ID; const BASE = (process.env.BRIQ_OTP_BASE_URL||process.env.BRIQ_BASE_URL||'https://api.briq.tz').replace(/\/$/,'');
+      if (!API_KEY || !DEV_APP) return res.status(500).json({ message: 'SMS OTP not configured' });
+      const body = { phone_number: normalizeMsisdn(rec.contact), developer_app_id: DEV_APP };
+      const r = await fetch(`${BASE}/otp/request`, { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${API_KEY}` }, body: JSON.stringify(body) });
+      let data=null; try{ data=await r.json(); } catch{ data=await r.text(); }
+      if (!r.ok || (data && data.success===false)) return res.status(500).json({ message:'Failed to send OTP (sms)', details: (data && (data.error||data.message)) || data });
+      return res.json({ sent: true, channel: 'sms', to: rec.contact });
+    }
+  } catch (err) { return res.status(500).json({ message: 'OTP request failed' }); }
+});
+
+// Verify OTP during two-step login
+app.post('/api/login/verify-otp', async (req, res) => {
+  try {
+    const { temp_token, code } = req.body || {};
+    if (!temp_token || !code) return res.status(400).json({ message: 'temp_token and code required' });
+    let decoded=null; try { decoded = jwt.verify(String(temp_token), JWT_SECRET); } catch { return res.status(401).json({ message: 'Invalid or expired temp token' }); }
+    if (!decoded?.sub || !decoded?.otp_pending) return res.status(400).json({ message: 'Invalid temp token' });
+    const userId = Number(decoded.sub);
+    // Load user
+    const rows = await q("SELECT id, name, email, role FROM users WHERE id = ? LIMIT 1", [userId]);
+    if (!rows.length) return res.status(404).json({ message: 'User not found' });
+    const user = rows[0];
+    const { models } = await getSequelize();
+    const rec = await models.User2FA.findByPk(userId);
+    if (!rec?.enabled) return res.status(400).json({ message: '2FA not enabled' });
+    let ok=false;
+    if (rec.method === 'otp') {
+      if (rec.contact.includes('@')) {
+        const now = new Date();
+        const row = await models.UserOTP.findOne({ where: { user_id: userId, channel: 'email', code: String(code), used_at: null }, order: [['id','DESC']] });
+        if (!row || new Date(row.expires_at) <= now) return res.status(400).json({ message: 'Invalid or expired code' });
+        await row.update({ used_at: new Date() }); ok = true;
+      } else {
+        const API_KEY = process.env.BRIQ_API_KEY; const DEV_APP = process.env.BRIQ_DEVELOPER_APP_ID; const BASE = (process.env.BRIQ_OTP_BASE_URL||process.env.BRIQ_BASE_URL||'https://api.briq.tz').replace(/\/$/,'');
+        if (!API_KEY || !DEV_APP) return res.status(500).json({ message: 'SMS OTP not configured' });
+        const body = { phone_number: normalizeMsisdn(rec.contact), code: String(code), developer_app_id: DEV_APP };
+        const r = await fetch(`${BASE}/otp/validate`, { method:'POST', headers:{ 'Content-Type':'application/json', 'Authorization':`Bearer ${API_KEY}` }, body: JSON.stringify(body) });
+        let data=null; try{ data=await r.json(); } catch{ data=await r.text(); }
+        if (!r.ok || (data && data.success===false)) return res.status(400).json({ message: 'Invalid code', details: (data && (data.error||data.message)) || data });
+        ok = true;
+      }
+    } else {
+      return res.status(400).json({ message: 'Unsupported 2FA method' });
+    }
+    if (!ok) return res.status(400).json({ message: 'Invalid code' });
+    const token = jwt.sign({ id: user.id, name: user.name, email: user.email, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    return res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+  } catch (err) { return res.status(500).json({ message: 'Verify OTP failed' }); }
 });
 
 app.get('/api/me', requireAuth, async (req, res) => {
@@ -630,8 +832,16 @@ app.post('/api/appointments', requireAuth, async (req, res) => {
     if (!date || !time) return res.status(400).json({ message: 'Missing date/time' });
     let finalPatientId = pId;
     if (role === 'patient' && !finalPatientId) {
-      const p = await q("SELECT id FROM patients WHERE user_id = ? LIMIT 1", [uid]);
-      if (!p.length) return res.status(400).json({ message: 'Patient profile not found' });
+      let p = await q("SELECT id FROM patients WHERE user_id = ? LIMIT 1", [uid]);
+      if (!p.length) {
+        // Auto-create patient profile from users table
+        const u = await q("SELECT id, name, email FROM users WHERE id = ? LIMIT 1", [uid]);
+        if (!u.length) return res.status(400).json({ message: 'User not found' });
+        const user = u[0];
+        const r = await q("INSERT INTO patients (user_id, name, email) VALUES (?,?,?)", [user.id, user.name || 'Patient', user.email || null]);
+        p = await q("SELECT id FROM patients WHERE id = ? LIMIT 1", [r.insertId]);
+        if (!p.length) return res.status(500).json({ message: 'Failed to create patient profile' });
+      }
       finalPatientId = p[0].id;
     }
     if (!finalPatientId) return res.status(400).json({ message: 'Missing patient_id' });

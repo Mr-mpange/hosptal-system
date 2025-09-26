@@ -22,12 +22,18 @@ app.post('/api/login/otp/request', async (req, res) => {
     const userId = Number(decoded.sub);
     const rec = await models.User2FA.findByPk(userId);
     if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
-    const code = String(Math.floor(100000 + Math.random()*900000));
-    const expires = new Date(Date.now() + 5*60*1000);
-    const channel = rec.contact.includes('@') ? 'email' : 'sms';
-    await models.UserOTP.create({ user_id: userId, channel, code, expires_at: expires });
-    // TODO: integrate real email/SMS provider here
-    res.json({ sent: true, channel, to: rec.contact, code }); // return code only for development
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      // Generate local code and send via SendGrid
+      const code = String(Math.floor(100000 + Math.random()*900000));
+      const expires = new Date(Date.now() + 5*60*1000);
+      await models.UserOTP.create({ user_id: userId, channel: 'email', code, expires_at: expires });
+      try { await sendgridSendEmail(rec.contact, 'Your login code', `Your login code is ${code}. It expires in 5 minutes.`); } catch (e) { console.warn('[sendgrid] send failed:', e?.message || e); }
+      res.json({ sent: true, channel: 'email', to: rec.contact });
+    } else {
+      await briqRequestOtp(rec.contact);
+      res.json({ sent: true, channel: 'sms', to: rec.contact });
+    }
   } catch (err) {
     console.error('/api/login/otp/request error:', err);
     return res.status(500).json({ message: 'OTP request failed', details: toDbMessage(err) });
@@ -42,6 +48,9 @@ import { sequelize, initModels, syncSequelize, models } from './sequelize.js';
 import jwt from 'jsonwebtoken';
 import { Op } from 'sequelize';
 import { initiate as zenopayInitiate, verifySignature as zenopayVerify, parseWebhook as zenopayParse } from './providers/zenopay.js';
+import { sendSms as briqSendSms } from './providers/briq.js';
+import { requestOtp as briqRequestOtp, validateOtp as briqValidateOtp } from './providers/briqOtp.js';
+import { sendEmail as sendgridSendEmail } from './providers/sendgrid.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -829,12 +838,19 @@ app.post('/api/2fa/otp/request', requireAuth, async (req, res) => {
     if (!userId) return res.status(400).json({ message: 'Invalid user' });
     const rec = await models.User2FA.findByPk(userId);
     if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
-    const code = String(Math.floor(100000 + Math.random()*900000));
-    const expires = new Date(Date.now() + 5*60*1000);
-    const channel = rec.contact.includes('@') ? 'email' : 'sms';
-    await models.UserOTP.create({ user_id: userId, channel, code, expires_at: expires });
-    // TODO: integrate real email/SMS provider here
-    res.json({ sent: true, channel, to: rec.contact, code }); // return code only for development
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      // Local code generation for email; send via SendGrid
+      const code = String(Math.floor(100000 + Math.random()*900000));
+      const expires = new Date(Date.now() + 5*60*1000);
+      await models.UserOTP.create({ user_id: userId, channel: 'email', code, expires_at: expires });
+      try { await sendgridSendEmail(rec.contact, 'Your verification code', `Your verification code is ${code}. It expires in 5 minutes.`); } catch (e) { console.warn('[sendgrid] send failed:', e?.message || e); }
+      res.json({ sent: true, channel: 'email', to: rec.contact });
+    } else {
+      // Use Briq OTP API for SMS
+      await briqRequestOtp(rec.contact);
+      res.json({ sent: true, channel: 'sms', to: rec.contact });
+    }
   } catch (e) { res.status(500).json({ message: 'OTP request failed' }); }
 });
 
@@ -844,12 +860,20 @@ app.post('/api/2fa/otp/verify', requireAuth, async (req, res) => {
     const userId = Number(req.user?.sub || req.user?.id || 0);
     const code = String(req.body?.code||'').trim();
     if (!userId || !code) return res.status(400).json({ message: 'Invalid request' });
-    const now = new Date();
-    const row = await models.UserOTP.findOne({ where: { user_id: userId, code, used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
-    if (!row) return res.status(400).json({ message: 'Invalid or expired code' });
-    await row.update({ used_at: new Date() });
-    // Enable 2FA as OTP method
     const rec = await models.User2FA.findByPk(userId);
+    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
+    const isEmail = rec.contact.includes('@');
+    if (isEmail) {
+      // Validate locally for email
+      const now = new Date();
+      const row = await models.UserOTP.findOne({ where: { user_id: userId, channel: 'email', code, used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
+      if (!row) return res.status(400).json({ message: 'Invalid or expired code' });
+      await row.update({ used_at: new Date() });
+    } else {
+      // Validate via Briq OTP API for SMS
+      await briqValidateOtp(rec.contact, code);
+    }
+    // Enable 2FA as OTP method
     if (rec) await rec.update({ method: 'otp', enabled: true }); else await models.User2FA.create({ user_id: userId, method: 'otp', enabled: true });
     res.json({ enabled: true, method: 'otp' });
   } catch (e) { res.status(500).json({ message: 'OTP verify failed' }); }
@@ -947,9 +971,16 @@ app.post('/api/login/verify-otp', async (req, res) => {
       const validCodes = totp(secret);
       ok = validCodes.includes(String(code));
     } else if (rec.method === 'otp') {
-      const now = new Date();
-      const row = await models.UserOTP.findOne({ where: { user_id: userId, code: String(code), used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
-      if (row) { ok = true; await row.update({ used_at: new Date() }); }
+      if (rec.contact.includes('@')) {
+        const now = new Date();
+        const row = await models.UserOTP.findOne({ where: { user_id: userId, channel: 'email', code: String(code), used_at: null, expires_at: { [Op.gt]: now } }, order: [['id','DESC']] });
+        if (!row) return res.status(400).json({ message: 'Invalid or expired code' });
+        await row.update({ used_at: new Date() });
+        ok = true;
+      } else {
+        await briqValidateOtp(rec.contact, code);
+        ok = true;
+      }
     } else {
       return res.status(400).json({ message: 'Unsupported 2FA method' });
     }
