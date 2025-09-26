@@ -44,6 +44,7 @@ const PatientDashboard = () => {
   const [submitting, setSubmitting] = useState(false);
   const [slots, setSlots] = useState<string[]>([]);
   const [notifCount, setNotifCount] = useState<number>(0);
+  const [recentNotifs, setRecentNotifs] = useState<Array<{id:number; title:string; message:string; created_at?:string; from_role?:string|null; from_name?:string|null}>>([]);
   const { toast } = useToast();
 
   const parseResponse = async (res: Response) => {
@@ -130,6 +131,29 @@ const PatientDashboard = () => {
     };
     load();
     return () => { if (timer) clearTimeout(timer); };
+  }, []);
+
+  // Realtime notifications via SSE: toast and append to recent list
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      const token = (() => { try { return localStorage.getItem('auth_token') || ''; } catch { return ''; } })();
+      if (!token) return;
+      es = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
+      es.addEventListener('notification', (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data || '{}');
+          // Only count patient-scoped notifications; server already scopes by role
+          setNotifCount(c => c + 1);
+          setRecentNotifs(prev => {
+            const next = [...prev, { id: data.id, title: data.title, message: data.message, created_at: data.created_at, from_role: data.from_role, from_name: data.from_name }];
+            return next.slice(-5);
+          });
+          toast({ title: data.title || 'Notification', description: data.message || '' });
+        } catch {}
+      });
+    } catch {}
+    return () => { try { es?.close(); } catch {} };
   }, []);
   return (
     <div className="space-y-6">
@@ -310,15 +334,30 @@ const PatientDashboard = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Upcoming Appointments */}
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2">
-              <Calendar className="w-5 h-5" />
-              Upcoming Appointments
-            </CardTitle>
-            <CardDescription>Your scheduled visits</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Calendar className="w-5 h-5" />
+            Upcoming Appointments
+          </CardTitle>
+          <CardDescription>Your scheduled visits</CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {/* Recent Notifications (realtime) */}
+          {recentNotifs.length > 0 && (
+            <div className="mb-2 space-y-2">
+              {recentNotifs.slice().reverse().map(n => (
+                <div key={n.id} className="p-2 border rounded">
+                  <p className="text-sm font-medium">{n.title}</p>
+                  <p className="text-xs text-muted-foreground">{n.message}</p>
+                  {(n.from_role || n.from_name) && (
+                    <p className="text-[11px] text-muted-foreground/80">From: {n.from_role}{n.from_name ? ` (${n.from_name})` : ''}</p>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+          {/* SSE handled via useEffect above */}
             {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
             {error && <div className="text-sm text-rose-700">{error}</div>}
             {!loading && !error && appts.map((a) => (

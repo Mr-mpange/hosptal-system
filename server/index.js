@@ -10,36 +10,6 @@ const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
 
-// Request OTP during two-step login using temp_token
-app.post('/api/login/otp/request', async (req, res) => {
-  try {
-    const { temp_token } = req.body || {};
-    if (!temp_token) return res.status(400).json({ message: 'temp_token required' });
-    if (!JWT_SECRET) return res.status(500).json({ message: 'Server is missing JWT_SECRET' });
-    let decoded = null;
-    try { decoded = jwt.verify(String(temp_token), JWT_SECRET); } catch (e) { return res.status(401).json({ message: 'Invalid or expired temp token' }); }
-    if (!decoded?.sub || !decoded?.otp_pending) return res.status(400).json({ message: 'Invalid temp token' });
-    const userId = Number(decoded.sub);
-    const rec = await models.User2FA.findByPk(userId);
-    if (!rec || rec.method !== 'otp' || !rec.contact) return res.status(400).json({ message: 'OTP method not configured' });
-    const isEmail = rec.contact.includes('@');
-    if (isEmail) {
-      // Generate local code and send via SendGrid
-      const code = String(Math.floor(100000 + Math.random()*900000));
-      const expires = new Date(Date.now() + 5*60*1000);
-      await models.UserOTP.create({ user_id: userId, channel: 'email', code, expires_at: expires });
-      try { await sendgridSendEmail(rec.contact, 'Your login code', `Your login code is ${code}. It expires in 5 minutes.`); } catch (e) { console.warn('[sendgrid] send failed:', e?.message || e); }
-      res.json({ sent: true, channel: 'email', to: rec.contact });
-    } else {
-      await briqRequestOtp(rec.contact);
-      res.json({ sent: true, channel: 'sms', to: rec.contact });
-    }
-  } catch (err) {
-    console.error('/api/login/otp/request error:', err);
-    return res.status(500).json({ message: 'OTP request failed', details: toDbMessage(err) });
-  }
-});
-
 // Core server imports and initialization must come BEFORE any route declarations
 import express from 'express';
 import cors from 'cors';
@@ -152,6 +122,69 @@ app.get('/api/payments', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('/api/payments GET error:', err);
     res.status(500).json({ message: 'Fetch payments failed', details: toDbMessage(err) });
+  }
+});
+
+// Approve appointment (doctor/admin)
+app.post('/api/appointments/:id/approve', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    const row = await models.Appointment.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.update({ status: 'approved' });
+    // Notify patient
+    try {
+      const notif = await models.Notification.create({ title: 'Appointment Approved', message: `Your appointment #${id} has been approved.`, target_role: 'patient', created_by: Number(req.user?.sub)||null });
+      try { sseBroadcastNotification(notif); } catch {}
+    } catch {}
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/appointments/:id/approve POST error:', err);
+    res.status(500).json({ message: 'Approve failed', details: toDbMessage(err) });
+  }
+});
+
+// Reject appointment (doctor/admin)
+app.post('/api/appointments/:id/reject', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    const row = await models.Appointment.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.update({ status: 'rejected' });
+    // Notify patient
+    try {
+      const notif = await models.Notification.create({ title: 'Appointment Rejected', message: `Your appointment #${id} was rejected.`, target_role: 'patient', created_by: Number(req.user?.sub)||null });
+      try { sseBroadcastNotification(notif); } catch {}
+    } catch {}
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/appointments/:id/reject POST error:', err);
+    res.status(500).json({ message: 'Reject failed', details: toDbMessage(err) });
+  }
+});
+
+// Reschedule appointment (doctor/admin)
+app.post('/api/appointments/:id/reschedule', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const date = req.body?.date || req.body?.appointment_date || req.body?.appointmentDate;
+    const time = req.body?.time || req.body?.appointment_time || req.body?.appointmentTime;
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    if (!date || !time) return res.status(400).json({ message: 'date and time required' });
+    const row = await models.Appointment.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    await row.update({ date: String(date), time: String(time), status: 'rescheduled' });
+    // Notify patient
+    try {
+      const notif = await models.Notification.create({ title: 'Appointment Rescheduled', message: `Your appointment #${id} has been rescheduled to ${date} ${time}.`, target_role: 'patient', created_by: Number(req.user?.sub)||null });
+      try { sseBroadcastNotification(notif); } catch {}
+    } catch {}
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/appointments/:id/reschedule POST error:', err);
+    res.status(500).json({ message: 'Reschedule failed', details: toDbMessage(err) });
   }
 });
 
@@ -994,20 +1027,36 @@ app.post('/api/login/verify-otp', async (req, res) => {
 });
 
 // ===== Notifications =====
-// Create notification (admin/manager only)
-app.post('/api/notifications', requireAuth, requireRole('admin', 'manager'), async (req, res) => {
+// Create notification (role-based targets)
+app.post('/api/notifications', requireAuth, async (req, res) => {
   try {
-    const { title, message, target_role } = req.body || {};
-    const allowedTargets = ['all','patient','doctor','admin','laboratorist','manager'];
+    const { title, message } = req.body || {};
+    let trg = String(req.body?.target_role || '').toLowerCase();
     if (!title || !message) {
       return res.status(400).json({ message: 'Missing required fields: title, message' });
     }
-    const trg = (target_role || 'all').toLowerCase();
-    if (!allowedTargets.includes(trg)) {
-      return res.status(400).json({ message: 'Invalid target_role' });
+    const sender = String(req.user?.role || '').toLowerCase();
+    // Allowed target policy
+    const allowedMap = {
+      patient: ['doctor'],
+      doctor: ['manager'],
+      manager: ['admin','doctor'],
+      admin: ['manager','doctor'],
+    };
+    const allowed = allowedMap[sender] || [];
+    if (!allowed.length) return res.status(403).json({ message: 'Your role cannot send notifications' });
+    if (!allowed.includes(trg)) {
+      return res.status(403).json({ message: 'Not allowed to target this role', details: { sender, allowed_targets: allowed } });
     }
     const created_by = req.user?.sub ? Number(req.user.sub) : null;
     const row = await models.Notification.create({ title, message, target_role: trg, created_by });
+    // Enrich broadcast with sender info
+    let from_name = null; let from_role = sender;
+    try {
+      const [urows] = await pool.query('SELECT name, role FROM users WHERE id = ? LIMIT 1', [created_by]);
+      if (urows && urows[0]) { from_name = urows[0].name || null; from_role = String(urows[0].role||sender); }
+    } catch {}
+    try { sseBroadcastNotification({ ...row.toJSON(), from_name, from_role }); } catch {}
     res.status(201).json(row);
   } catch (err) {
     console.error('/api/notifications POST error:', err);
@@ -1046,7 +1095,19 @@ app.get('/api/notifications', requireAuth, async (req, res) => {
         readMap = new Set(reads.map(r => r.notification_id));
       }
     } catch {}
-    res.json(list.map(n => ({ ...n.toJSON(), read: readMap.has(n.id) })));
+    // attach sender info
+    let senderMap = new Map();
+    try {
+      const ids = Array.from(new Set(list.map(n => Number(n.created_by)).filter(Boolean)));
+      if (ids.length) {
+        const [rows] = await pool.query(`SELECT id, name, role FROM users WHERE id IN (${ids.map(()=>'?').join(',')})`, ids);
+        for (const r of rows || []) senderMap.set(Number(r.id), { from_name: r.name || null, from_role: String(r.role||'') });
+      }
+    } catch {}
+    const unreadOnly = String(req.query.unread||'').toLowerCase();
+    const onlyUnread = ['1','true','yes','on'].includes(unreadOnly);
+    const items = list.map(n => ({ ...n.toJSON(), read: readMap.has(n.id), ...(senderMap.get(Number(n.created_by)) || {}) }));
+    res.json(onlyUnread ? items.filter(n => !n.read) : items);
   } catch (err) {
     console.error('/api/notifications GET error:', err);
     res.status(500).json({ message: 'Fetch notifications failed', details: toDbMessage(err) });
@@ -1152,6 +1213,21 @@ app.get('/api/ping', (_req, res) => {
 });
 
 // ===== Server-Sent Events for notifications =====
+const sseClients = [];
+function sseBroadcastNotification(n) {
+  try {
+    const payload = { id: n.id || Date.now(), title: n.title, message: n.message, role: n.target_role || 'all', created_at: n.created_at || new Date().toISOString() };
+    for (const c of sseClients) {
+      if (payload.role === 'all' || String(c.role).toLowerCase() === String(payload.role).toLowerCase()) {
+        try {
+          c.res.write(`event: notification\n`);
+          c.res.write(`data: ${JSON.stringify(payload)}\n\n`);
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
 app.get('/api/events', async (req, res) => {
   try {
     // Authenticate: prefer Authorization header, else token query param
@@ -1188,20 +1264,43 @@ app.get('/api/events', async (req, res) => {
     // Initial hello
     send('message', { type: 'hello', time: new Date().toISOString() });
 
-    // On connect, send recent notifications for the user role
+    // On connect, send recent UNREAD notifications for the user role
     try {
       const role = String(user.role || 'all');
+      const userId = Number(user.sub);
       const notifs = await models.Notification.findAll({
-        where: {
-          target_role: { [Op.in]: ['all', role] },
-        },
+        where: { target_role: { [Op.in]: ['all', role] } },
         order: [['id','DESC']],
-        limit: 5,
+        limit: 10,
       });
+      let readSet = new Set();
+      // Build sender map for from_name/from_role
+      let senderMap = new Map();
+      try {
+        const ids = Array.from(new Set(notifs.map(n => Number(n.created_by)).filter(Boolean)));
+        if (ids.length) {
+          const [rows] = await pool.query(`SELECT id, name, role FROM users WHERE id IN (${ids.map(()=>'?').join(',')})`, ids);
+          for (const r of rows || []) senderMap.set(Number(r.id), { from_name: r.name || null, from_role: String(r.role||'') });
+        }
+      } catch {}
+      try {
+        const ids = notifs.map(n => n.id);
+        if (ids.length) {
+          const reads = await models.NotificationsRead.findAll({ where: { user_id: userId, notification_id: { [Op.in]: ids } }, attributes: ['notification_id'] });
+          readSet = new Set(reads.map(r => r.notification_id));
+        }
+      } catch {}
       for (const n of notifs.reverse()) {
-        send('notification', { id: n.id, title: n.title, message: n.message, role: n.target_role, created_at: n.created_at });
+        if (readSet.has(n.id)) continue; // skip already read
+        const sender = senderMap.get(Number(n.created_by)) || {};
+        send('notification', { id: n.id, title: n.title, message: n.message, role: n.target_role, created_at: n.created_at, ...sender });
       }
     } catch {}
+
+    // Register client for broadcast
+    const role = String(user.role || 'all');
+    const client = { res, role };
+    sseClients.push(client);
 
     // Heartbeat
     const hb = setInterval(() => {
@@ -1210,6 +1309,8 @@ app.get('/api/events', async (req, res) => {
 
     req.on('close', () => {
       clearInterval(hb);
+      const idx = sseClients.indexOf(client);
+      if (idx >= 0) sseClients.splice(idx, 1);
     });
   } catch (err) {
     try { res.end(); } catch {}
@@ -1254,16 +1355,27 @@ app.get('/api/doctors', requireAuth, async (_req, res) => {
 // ===== Appointment create with conflict check (auth) =====
 app.post('/api/appointments', requireAuth, async (req, res) => {
   try {
-    const { patient_id, doctor_id, date, time, notes } = req.body || {};
+    const { patient_id, doctor_id, notes } = req.body || {};
+    const date = req.body?.date || req.body?.appointment_date || req.body?.appointmentDate;
+    const time = req.body?.time || req.body?.appointment_time || req.body?.appointmentTime;
     let pid = Number(patient_id);
     const did = doctor_id ? Number(doctor_id) : null;
     const role = String(req.user?.role || '').toLowerCase();
     // If patient, infer patient_id from user
     if (!pid && role === 'patient') {
-      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user?.sub)]);
+      const userId = Number(req.user?.sub);
+      const [[row]] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [userId]);
       pid = row?.id;
+      if (!pid) {
+        // Auto-create patient profile from users table
+        const [[u]] = await pool.query('SELECT id, name, email FROM users WHERE id = ? LIMIT 1', [userId]);
+        if (!u) return res.status(400).json({ message: 'User not found' });
+        const [ins] = await pool.query('INSERT INTO patients (user_id, name, email) VALUES (?,?,?)', [u.id, u.name || 'Patient', u.email || null]);
+        pid = ins?.insertId;
+        if (!pid) return res.status(500).json({ message: 'Failed to create patient profile' });
+      }
     }
-    if (!pid || !date || !time) return res.status(400).json({ message: 'Missing patient_id/date/time' });
+    if (!pid || !date || !time) return res.status(400).json({ message: 'Missing patient_id/date/time', details: 'Provide date and time as YYYY-MM-DD and HH:mm (e.g., 2025-09-26, 14:30)' });
     // Conflict check (same doctor/date/time)
     if (did) {
       const conflict = await models.Appointment.count({ where: { doctor_id: did, date: String(date), time: String(time) } });
@@ -1633,12 +1745,65 @@ app.put('/api/availability/:id', requireAuth, requireRole('doctor','admin'), asy
     const id = Number(req.params.id);
     const row = await models.Availability.findByPk(id);
     if (!row) return res.status(404).json({ message: 'Not found' });
+    // Ownership: doctor can only edit own availability; admin bypasses
+    const role = String(req.user?.role||'').toLowerCase();
+    const uid = Number(req.user?.sub);
+    if (role === 'doctor' && Number(row.doctor_user_id) !== uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
     const { date, start_time, end_time, status } = req.body || {};
     await row.update({ date, start_time, end_time, status });
     res.json(row);
   } catch (err) {
     console.error('/api/availability PUT error:', err);
     res.status(500).json({ message: 'Update availability failed', details: toDbMessage(err) });
+  }
+});
+// Read single availability (doctor sees only own)
+app.get('/api/availability/:id', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Availability.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const role = String(req.user?.role||'').toLowerCase();
+    const uid = Number(req.user?.sub);
+    if (role === 'doctor' && Number(row.doctor_user_id) !== uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    res.json(row);
+  } catch (err) {
+    console.error('/api/availability GET by id error:', err);
+    res.status(500).json({ message: 'Fetch availability failed', details: toDbMessage(err) });
+  }
+});
+// Read single availability
+app.get('/api/availability/:id', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Availability.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    res.json(row);
+  } catch (err) {
+    console.error('/api/availability GET by id error:', err);
+    res.status(500).json({ message: 'Fetch availability failed', details: toDbMessage(err) });
+  }
+});
+// Delete availability
+app.delete('/api/availability/:id', requireAuth, requireRole('doctor','admin'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const row = await models.Availability.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const role = String(req.user?.role||'').toLowerCase();
+    const uid = Number(req.user?.sub);
+    if (role === 'doctor' && Number(row.doctor_user_id) !== uid) {
+      return res.status(403).json({ message: 'Forbidden' });
+    }
+    await row.destroy();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('/api/availability DELETE error:', err);
+    res.status(500).json({ message: 'Delete availability failed', details: toDbMessage(err) });
   }
 });
 // ===== Metrics: Doctor (doctor/admin)
@@ -2303,6 +2468,40 @@ app.get('/api/patients/:id/invoices', requireAuth, async (req, res) => {
     console.error('/api/patients/:id/invoices GET error:', err);
     res.status(500).json({ message: 'Fetch patient invoices failed', details: toDbMessage(err) });
   }
+});
+
+// ===== Patient-friendly endpoints that infer patient_id from JWT =====
+app.get('/api/my/appointments', requireAuth, async (req, res) => {
+  try {
+    if (req.user?.role !== 'patient') return res.status(403).json({ message: 'Forbidden' });
+    const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+    const pid = rows && rows[0]?.id;
+    if (!pid) return res.json([]);
+    const list = await models.Appointment.findAll({ where: { patient_id: pid }, order: [['id','DESC']], limit: 200 });
+    res.json(list);
+  } catch (err) { console.error('/api/my/appointments error:', err); res.status(500).json({ message: 'Failed', details: toDbMessage(err) }); }
+});
+
+app.get('/api/my/records', requireAuth, async (req, res) => {
+  try {
+    if (req.user?.role !== 'patient') return res.status(403).json({ message: 'Forbidden' });
+    const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+    const pid = rows && rows[0]?.id;
+    if (!pid) return res.json([]);
+    const list = await models.MedicalRecord.findAll({ where: { patient_id: pid }, order: [['id','DESC']], limit: 200 });
+    res.json(list);
+  } catch (err) { console.error('/api/my/records error:', err); res.status(500).json({ message: 'Failed', details: toDbMessage(err) }); }
+});
+
+app.get('/api/my/invoices', requireAuth, async (req, res) => {
+  try {
+    if (req.user?.role !== 'patient') return res.status(403).json({ message: 'Forbidden' });
+    const [rows] = await pool.query('SELECT id FROM patients WHERE user_id = ? LIMIT 1', [Number(req.user.sub)]);
+    const pid = rows && rows[0]?.id;
+    if (!pid) return res.json([]);
+    const list = await models.Invoice.findAll({ where: { patient_id: pid }, include: [{ model: models.Patient, attributes: ['id','name','email'] }], order: [['id','DESC']], limit: 200 });
+    res.json(list);
+  } catch (err) { console.error('/api/my/invoices error:', err); res.status(500).json({ message: 'Failed', details: toDbMessage(err) }); }
 });
 
 // API 404 handler

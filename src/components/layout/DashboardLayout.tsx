@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { Outlet, useNavigate } from "react-router-dom";
 import { 
   Heart, 
@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
-import { useEffect } from "react";
+ 
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 interface DashboardLayoutProps {
@@ -33,6 +33,12 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
   const [notifOpen, setNotifOpen] = useState(false);
   const [notifications, setNotifications] = useState<Array<{id:number; title:string; message:string; created_at?:string}>>([]);
   const [unread, setUnread] = useState(0);
+  // Compose notification state
+  const [composeOpen, setComposeOpen] = useState(false);
+  const [composeTitle, setComposeTitle] = useState('');
+  const [composeMessage, setComposeMessage] = useState('');
+  const [composeTarget, setComposeTarget] = useState<'doctor'|'manager'|'admin'>('doctor');
+  const [composeBusy, setComposeBusy] = useState(false);
   const navigate = useNavigate();
 
   const getMenuItems = () => {
@@ -90,6 +96,77 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
     } catch {}
     return () => { try { es?.close(); } catch {} };
   }, []);
+
+  const allowedTargets = useMemo(() => {
+    switch (userRole) {
+      case 'patient': return ['doctor'] as const;
+      case 'doctor': return ['manager'] as const;
+      case 'manager': return ['admin','doctor'] as const;
+      case 'admin': return ['manager','doctor'] as const;
+      default: return [] as const;
+    }
+  }, [userRole]);
+
+  // Ensure we only load unread notifications once per session (per mount),
+  // regardless of state changes that might re-render this component
+  const hasLoadedRef = useRef(false);
+
+  useEffect(() => {
+    if (!allowedTargets.length) return;
+    if (!allowedTargets.includes(composeTarget as any)) {
+      setComposeTarget(allowedTargets[0] as any);
+    }
+    // Load unread notifications once per role change
+    if (hasLoadedRef.current) return;
+    hasLoadedRef.current = true;
+    (async () => {
+      try {
+        const token = (()=>{ try { return localStorage.getItem('auth_token')||''; } catch { return ''; } })();
+        const res = await fetch('/api/notifications?unread=true', { headers: token ? { Authorization: `Bearer ${token}` } : undefined });
+        const data = await res.json();
+        if (Array.isArray(data)) {
+          setNotifications(data.slice(-20));
+          setUnread(data.length);
+        }
+      } catch {}
+    })();
+  }, [userRole, allowedTargets, composeTarget]);
+
+  const authToken = (() => { try { return localStorage.getItem('auth_token') || ''; } catch { return ''; } })();
+
+  // Auto-mark notifications as read when dropdown opens
+  useEffect(() => {
+    if (!notifOpen) return;
+    if (!notifications.length) return;
+    (async () => {
+      try {
+        await Promise.all(
+          notifications.map(n => fetch(`/api/notifications/${n.id}/read`, { method:'POST', headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined }))
+        );
+        setUnread(0);
+      } catch {}
+    })();
+  }, [notifOpen, notifications]);
+  async function sendNotification() {
+    if (!composeTitle.trim() || !composeMessage.trim()) return;
+    if (!allowedTargets.length) return;
+    setComposeBusy(true);
+    try {
+      const res = await fetch('/api/notifications', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}) },
+        body: JSON.stringify({ title: composeTitle.trim(), message: composeMessage.trim(), target_role: composeTarget }),
+      });
+      const data = await res.json().catch(()=>({}));
+      if (!res.ok) throw new Error(data?.message || 'Failed to send');
+      // Optimistically add to list for current user if visible
+      setNotifications(prev => [{ id: data?.id || Date.now(), title: composeTitle.trim(), message: composeMessage.trim(), created_at: new Date().toISOString() }, ...prev].slice(0,20));
+      setUnread(u => u + 1);
+      setComposeOpen(false); setComposeTitle(''); setComposeMessage('');
+    } catch (e:any) {
+      alert(e?.message || 'Failed to send notification');
+    } finally { setComposeBusy(false); }
+  }
 
   return (
     <div className="flex h-screen bg-background">
@@ -203,7 +280,44 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
                   )}
                 </Button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-80 max-h-80 overflow-auto">
+              <DropdownMenuContent align="end" className="w-96 max-h-[28rem] overflow-auto">
+                {/* Compose section (only if role has allowed targets) */}
+                {allowedTargets.length > 0 && (
+                  <div className="p-3 border-b bg-muted/10">
+                    {!composeOpen ? (
+                      <Button size="sm" variant="outline" onClick={()=> setComposeOpen(true)}>New notification</Button>
+                    ) : (
+                      <div className="space-y-2">
+                        <input
+                          className="border rounded px-2 py-1 w-full text-sm"
+                          placeholder="Title"
+                          value={composeTitle}
+                          onChange={(e)=> setComposeTitle(e.target.value)}
+                        />
+                        <textarea
+                          className="border rounded px-2 py-1 w-full text-sm"
+                          placeholder="Message"
+                          rows={3}
+                          value={composeMessage}
+                          onChange={(e)=> setComposeMessage(e.target.value)}
+                        />
+                        <div className="flex items-center gap-2">
+                          <label className="text-xs text-muted-foreground">Target</label>
+                          <select className="border rounded px-2 py-1 text-sm" value={composeTarget} onChange={(e)=> setComposeTarget(e.target.value as any)}>
+                            {allowedTargets.map(t => (
+                              <option key={t} value={t}>{t}</option>
+                            ))}
+                          </select>
+                          <Button size="sm" onClick={sendNotification} disabled={composeBusy || !composeTitle.trim() || !composeMessage.trim()}>
+                            {composeBusy ? 'Sending…' : 'Send'}
+                          </Button>
+                          <Button size="sm" variant="ghost" onClick={()=> { setComposeOpen(false); setComposeTitle(''); setComposeMessage(''); }}>Cancel</Button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
                 {notifications.length === 0 && (
                   <div className="p-3 text-sm text-muted-foreground">No notifications</div>
                 )}
@@ -212,12 +326,31 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
                     <div>
                       <p className="text-sm font-medium">{n.title}</p>
                       <p className="text-xs text-muted-foreground">{n.message}</p>
+                      {/** optional sender info if provided by SSE */}
+                      { (n as any).from_role && (
+                        <p className="text-[11px] text-muted-foreground/80">From: {(n as any).from_role}{(n as any).from_name ? ` (${(n as any).from_name})` : ''}</p>
+                      )}
                     </div>
                   </DropdownMenuItem>
                 ))}
                 {notifications.length > 0 && (
                   <div className="p-2">
-                    <Button variant="outline" size="sm" className="w-full" onClick={()=>{ setUnread(0); }}>Mark all as read</Button>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="w-full"
+                      onClick={async ()=>{
+                        try {
+                          const token = (()=>{ try { return localStorage.getItem('auth_token')||''; } catch { return ''; } })();
+                          await Promise.all(
+                            notifications.map(n => fetch(`/api/notifications/${n.id}/read`, { method:'POST', headers: token ? { Authorization: `Bearer ${token}` } : undefined }))
+                          );
+                          setUnread(0);
+                        } catch {}
+                      }}
+                    >
+                      Mark all as read
+                    </Button>
                   </div>
                 )}
               </DropdownMenuContent>

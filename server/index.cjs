@@ -34,6 +34,74 @@ app.use((req, _res, next) => {
   next();
 });
 
+// ===== Appointments: doctor actions (approve/reject/reschedule) =====
+app.post('/api/appointments/:id/approve', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    const a = await q("SELECT id FROM appointments WHERE id = ? LIMIT 1", [id]);
+    if (!a.length) return res.status(404).json({ message: 'Not found' });
+    await q("UPDATE appointments SET status='approved' WHERE id = ?", [id]);
+    try {
+      const r = await pool.query("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Approved', `Your appointment #${id} has been approved.`, 'patient', req.user.id]);
+      const nid = r?.[0]?.insertId;
+      sseBroadcastNotification({ id: nid, title: 'Appointment Approved', message: `Your appointment #${id} has been approved.`, target_role: 'patient', created_at: new Date().toISOString() });
+    } catch {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: 'Approve failed' }); }
+});
+app.post('/api/appointments/:id/reject', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    const a = await q("SELECT id FROM appointments WHERE id = ? LIMIT 1", [id]);
+    if (!a.length) return res.status(404).json({ message: 'Not found' });
+    await q("UPDATE appointments SET status='rejected' WHERE id = ?", [id]);
+    try {
+      const r = await pool.query("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Rejected', `Your appointment #${id} was rejected.`, 'patient', req.user.id]);
+      const nid = r?.[0]?.insertId;
+      sseBroadcastNotification({ id: nid, title: 'Appointment Rejected', message: `Your appointment #${id} was rejected.`, target_role: 'patient', created_at: new Date().toISOString() });
+    } catch {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: 'Reject failed' }); }
+});
+app.post('/api/appointments/:id/reschedule', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const date = req.body?.date || req.body?.appointment_date || req.body?.appointmentDate;
+    const time = req.body?.time || req.body?.appointment_time || req.body?.appointmentTime;
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    if (!date || !time) return res.status(400).json({ message: 'date and time required' });
+    const a = await q("SELECT id FROM appointments WHERE id = ? LIMIT 1", [id]);
+    if (!a.length) return res.status(404).json({ message: 'Not found' });
+    await q("UPDATE appointments SET date = ?, time = ?, status='rescheduled' WHERE id = ?", [String(date), String(time), id]);
+    try {
+      const r = await pool.query("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", ['Appointment Rescheduled', `Your appointment #${id} has been rescheduled to ${date} ${time}.`, 'patient', req.user.id]);
+      const nid = r?.[0]?.insertId;
+      sseBroadcastNotification({ id: nid, title: 'Appointment Rescheduled', message: `Your appointment #${id} has been rescheduled to ${date} ${time}.`, target_role: 'patient', created_at: new Date().toISOString() });
+    } catch {}
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: 'Reschedule failed' }); }
+});
+
+// ===== Availability CRUD (basic) =====
+app.get('/api/availability/:id', requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const rows = await q("SELECT * FROM availability WHERE id = ? LIMIT 1", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    res.json(rows[0]);
+  } catch (e) { res.status(500).json({ message: 'Failed' }); }
+});
+app.delete('/api/availability/:id', requireAuth, requireRole(['doctor','admin']), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const rows = await q("SELECT * FROM availability WHERE id = ? LIMIT 1", [id]);
+    if (!rows.length) return res.status(404).json({ message: 'Not found' });
+    await q("DELETE FROM availability WHERE id = ?", [id]);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ message: 'Failed' }); }
+});
 // ===== Initialize Sequelize models from ESM module =====
 let __sequelizeMods = null;
 async function getSequelize() {
@@ -53,6 +121,96 @@ async function getSequelize() {
     console.error('[sequelize] init error:', e?.message || e);
   }
 })();
+
+// ===== In-app notifications via SSE =====
+const sseClients = [];
+function sseBroadcastNotification(n) {
+  try {
+    const payload = JSON.stringify({
+      id: n.id || Date.now(),
+      title: n.title,
+      message: n.message,
+      target_role: n.target_role || 'all',
+      created_at: n.created_at || new Date().toISOString(),
+    });
+    sseClients.forEach(c => {
+      if (n.target_role === 'all' || c.role === n.target_role) {
+        c.res.write(`event: notification\n`);
+        c.res.write(`data: ${payload}\n\n`);
+      }
+    });
+  } catch (e) { console.warn('[sse] broadcast failed:', e?.message || e); }
+}
+
+app.get('/api/events', (req, res) => {
+  // Authenticate via Authorization header or token query param
+  let user = null;
+  try {
+    const auth = req.headers['authorization'] || '';
+    const parts = auth.split(' ');
+    if (parts.length === 2 && parts[0] === 'Bearer') {
+      user = jwt.verify(parts[1], JWT_SECRET);
+    } else if (req.query?.token) {
+      user = jwt.verify(String(req.query.token), JWT_SECRET);
+    }
+  } catch {}
+  if (!user) {
+    res.writeHead(401, { 'Content-Type': 'text/plain' });
+    return res.end('Unauthorized');
+  }
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+    'X-Accel-Buffering': 'no',
+    'Access-Control-Allow-Origin': '*',
+  });
+  const client = { res, role: String(user.role || 'all') };
+  sseClients.push(client);
+  req.on('close', () => {
+    const idx = sseClients.indexOf(client);
+    if (idx >= 0) sseClients.splice(idx, 1);
+  });
+  // Heartbeat
+  const hb = setInterval(() => { try { res.write(`event: ping\ndata: ${Date.now()}\n\n`); } catch {} }, 25000);
+  res.on('close', () => { try { clearInterval(hb); } catch {} });
+});
+
+// List notifications (last 50) filtered by role
+app.get('/api/notifications', requireAuth, async (req, res) => {
+  try {
+    const role = String(req.user.role || 'all');
+    const rows = await q("SELECT id, title, message, target_role, created_at FROM notifications WHERE target_role = 'all' OR target_role = ? ORDER BY id DESC LIMIT 50", [role]);
+    res.json(rows);
+  } catch { res.status(500).json({ message: 'Failed to load notifications' }); }
+});
+
+// Create a notification (admin/manager)
+app.post('/api/notifications', requireAuth, async (req, res) => {
+  try {
+    const { title, message } = req.body || {};
+    let tr = String(req.body?.target_role || '').toLowerCase();
+    if (!title || !message) return res.status(400).json({ message: 'title and message required' });
+    const sender = String(req.user?.role || '').toLowerCase();
+    // Enforce policy
+    const allowedMap = {
+      patient: ['doctor'],
+      doctor: ['manager'],
+      manager: ['admin','doctor'],
+      admin: ['manager','doctor'],
+    };
+    const allowed = allowedMap[sender] || [];
+    if (!allowed.length) return res.status(403).json({ message: 'Your role cannot send notifications' });
+    if (!allowed.includes(tr)) {
+      return res.status(403).json({ message: 'Not allowed to target this role', details: { sender, allowed_targets: allowed } });
+    }
+    const r = await pool.query("INSERT INTO notifications (title, message, target_role, created_by) VALUES (?,?,?,?)", [title, message, tr, req.user.id]);
+    const insertId = r?.[0]?.insertId;
+    const created = { id: insertId, title, message, target_role: tr, created_at: new Date().toISOString() };
+    sseBroadcastNotification(created);
+    res.status(201).json(created);
+  } catch (e) { res.status(500).json({ message: 'Create notification failed' }); }
+});
 
 // ===== Simple file-backed settings =====
 const settingsPath = path.resolve(__dirname, 'settings.json');
@@ -826,10 +984,12 @@ app.post('/api/appointments', requireAuth, async (req, res) => {
   try {
     const role = String(req.user.role || '').toLowerCase();
     const uid = req.user.id;
-    const { patient_id, doctor_id, date, time, notes } = req.body || {};
+    const { patient_id, doctor_id, notes } = req.body || {};
+  const date = req.body?.date || req.body?.appointment_date || req.body?.appointmentDate;
+  const time = req.body?.time || req.body?.appointment_time || req.body?.appointmentTime;
     const pId = patient_id ? Number(patient_id) : null;
     let dId = doctor_id ? Number(doctor_id) : null;
-    if (!date || !time) return res.status(400).json({ message: 'Missing date/time' });
+    if (!date || !time) return res.status(400).json({ message: 'Missing date/time', details: 'Provide date and time as YYYY-MM-DD and HH:mm (e.g., 2025-09-26, 14:30)' });
     let finalPatientId = pId;
     if (role === 'patient' && !finalPatientId) {
       let p = await q("SELECT id FROM patients WHERE user_id = ? LIMIT 1", [uid]);

@@ -5,7 +5,16 @@ import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
 
-interface Notif { id:number; title:string; message:string; target_role:string; created_at?:string }
+interface Notif {
+  id:number;
+  title:string;
+  message:string;
+  target_role:string;
+  created_at?:string;
+  from_role?: string | null;
+  from_name?: string | null;
+  read?: boolean;
+}
 
 const Notifications = () => {
   const [items, setItems] = useState<Notif[]>([]);
@@ -105,12 +114,15 @@ const Notifications = () => {
           {loading && <div className="text-sm text-muted-foreground">Loading…</div>}
           {error && <div className="text-sm text-rose-700">{error}</div>}
           {!loading && !error && filtered.map(n => {
-            const isRead = readIds.has(n.id);
+            const isRead = n.read ?? readIds.has(n.id);
             return (
               <div key={n.id} className="p-3 border rounded flex items-start justify-between gap-3">
                 <div className="min-w-0">
                   <p className="font-medium truncate">{n.title}</p>
                   <p className="text-xs text-muted-foreground break-words">{n.message}</p>
+                  {(n.from_role || n.from_name) && (
+                    <p className="text-[11px] text-muted-foreground/80 mt-0.5">From: {n.from_role}{n.from_name ? ` (${n.from_name})` : ''}</p>
+                  )}
                   <p className="text-[10px] text-muted-foreground mt-1">{n.created_at ? new Date(n.created_at).toLocaleString() : ''}</p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -120,6 +132,8 @@ const Notifications = () => {
                       const res = await fetch(`/api/notifications/${n.id}/read`, { method:'POST', headers: authHeaders() });
                       if (!res.ok) { const t = await res.text(); throw new Error(t); }
                       const next = new Set(readIds); next.add(n.id); saveRead(next);
+                      // Update local state read flag if present
+                      setItems(prev => prev.map(it => it.id === n.id ? { ...it, read: true } : it));
                     } catch {}
                   }}>Mark read</Button>
                 </div>

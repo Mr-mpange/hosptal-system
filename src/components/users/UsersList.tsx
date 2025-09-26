@@ -10,7 +10,7 @@ interface UserRow {
   id: number;
   name: string;
   email: string;
-  role?: "patient" | "doctor" | "admin";
+  role?: "patient" | "doctor" | "admin" | "manager";
   created_at?: string;
 }
 
@@ -53,7 +53,7 @@ const UsersList = () => {
   const [aName, setAName] = useState("");
   const [aEmail, setAEmail] = useState("");
   const [aPass, setAPass] = useState("");
-  const [aRole, setARole] = useState<"patient" | "doctor" | "admin">("patient");
+  const [aRole, setARole] = useState<"patient" | "doctor" | "admin" | "manager">("patient");
   const [aSubmitting, setASubmitting] = useState(false);
 
   const submitAdminCreate = async () => {
@@ -124,6 +124,7 @@ const UsersList = () => {
                   <SelectItem value="patient">Patient</SelectItem>
                   <SelectItem value="doctor">Doctor</SelectItem>
                   <SelectItem value="admin">Admin</SelectItem>
+                  <SelectItem value="manager">Manager</SelectItem>
                 </SelectContent>
               </Select>
             </div>

@@ -48,6 +48,13 @@ const DoctorDashboard = () => {
   const [formTests, setFormTests] = useState<string>("");
   const [submitting, setSubmitting] = useState(false);
   const [avail, setAvail] = useState<Array<{id:number; date:string; start_time?:string|null; end_time?:string|null; status:'on'|'off'}>>([]);
+  const [editingId, setEditingId] = useState<number|null>(null);
+  const [editDate, setEditDate] = useState<string>('');
+  const [editStart, setEditStart] = useState<string>('');
+  const [editEnd, setEditEnd] = useState<string>('');
+  const [editStatus, setEditStatus] = useState<'on'|'off'>('on');
+  const [savingAvail, setSavingAvail] = useState<boolean>(false);
+  const [recentNotifs, setRecentNotifs] = useState<Array<{id:number; title:string; message:string; created_at?:string; from_role?:string|null; from_name?:string|null}>>([]);
   const [avDate, setAvDate] = useState<string>(new Date().toISOString().slice(0,10));
   const [avStart, setAvStart] = useState<string>("09:00");
   const [avEnd, setAvEnd] = useState<string>("17:00");
@@ -66,6 +73,18 @@ const DoctorDashboard = () => {
     const headers: Record<string, string> = { 'Content-Type': 'application/json' } as any;
     if (token) headers.Authorization = `Bearer ${token}`;
     return headers;
+  };
+
+  const refreshAvailRange = async () => {
+    try {
+      const token = (() => { try { return localStorage.getItem('auth_token') || undefined; } catch { return undefined; } })();
+      const headers = token ? { Authorization: `Bearer ${token}` } : undefined;
+      const from = new Date().toISOString().slice(0,10);
+      const to = new Date(Date.now()+14*24*60*60*1000).toISOString().slice(0,10);
+      const list = await fetch(`/api/availability?from=${from}&to=${to}`, { headers });
+      const data = await list.json();
+      setAvail(Array.isArray(data) ? data : []);
+    } catch {}
   };
   const refreshSchedule = async () => {
     try {
@@ -148,12 +167,42 @@ const DoctorDashboard = () => {
       } catch { setResSlots([]); }
     })();
   }, [showRes, resDate, userId]);
+
+  // Realtime notifications via SSE: toast and recent list
+  useEffect(() => {
+    let es: EventSource | null = null;
+    try {
+      const token = (() => { try { return localStorage.getItem('auth_token') || ''; } catch { return ''; } })();
+      if (!token) return;
+      es = new EventSource(`/api/events?token=${encodeURIComponent(token)}`);
+      es.addEventListener('notification', (ev: MessageEvent) => {
+        try {
+          const data = JSON.parse(ev.data || '{}');
+          setRecentNotifs(prev => {
+            const next = [...prev, { id: data.id, title: data.title, message: data.message, created_at: data.created_at, from_role: data.from_role, from_name: data.from_name }];
+            return next.slice(-5);
+          });
+          toast({ title: data.title || 'Notification', description: data.message || '' });
+        } catch {}
+      });
+    } catch {}
+    return () => { try { es?.close(); } catch {} };
+  }, []);
+  const greeting = (() => {
+    const h = new Date().getHours();
+    if (h < 5) return 'Good night';
+    if (h < 12) return 'Good morning';
+    if (h < 17) return 'Good afternoon';
+    if (h < 21) return 'Good evening';
+    return 'Good night';
+  })();
+
   return (
     <div className="space-y-6">
       {/* Welcome section */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold text-foreground">Good morning, {displayName}</h1>
+          <h1 className="text-3xl font-bold text-foreground">{greeting}, {displayName}</h1>
           <p className="text-muted-foreground">You have {schedule.length} appointments scheduled</p>
         </div>
         <div className="flex items-center gap-2">
@@ -368,12 +417,69 @@ const DoctorDashboard = () => {
 
           <div className="space-y-2 max-h-64 overflow-auto">
             {avail.map(a => (
-              <div key={a.id} className="flex items-center justify-between p-3 border rounded">
-                <div>
-                  <p className="font-medium">{a.date}</p>
-                  <p className="text-xs text-muted-foreground">{a.start_time || '--:--'} - {a.end_time || '--:--'}</p>
-                </div>
-                <Badge className="capitalize">{a.status}</Badge>
+              <div key={a.id} className="p-3 border rounded">
+                {editingId === a.id ? (
+                  <div className="grid grid-cols-1 md:grid-cols-5 gap-2 items-end">
+                    <div>
+                      <Label className="text-xs">Date</Label>
+                      <Input type="date" value={editDate} onChange={(e)=>setEditDate(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Start</Label>
+                      <Input type="time" value={editStart} onChange={(e)=>setEditStart(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label className="text-xs">End</Label>
+                      <Input type="time" value={editEnd} onChange={(e)=>setEditEnd(e.target.value)} />
+                    </div>
+                    <div>
+                      <Label className="text-xs">Status</Label>
+                      <select className="w-full border rounded h-10 px-2" value={editStatus} onChange={(e)=>setEditStatus(e.target.value as 'on'|'off')}>
+                        <option value="on">on</option>
+                        <option value="off">off</option>
+                      </select>
+                    </div>
+                    <div className="flex gap-2">
+                      <Button size="sm" disabled={savingAvail} onClick={async ()=>{
+                        try {
+                          setSavingAvail(true);
+                          const token = localStorage.getItem('auth_token')||undefined;
+                          const headers:any = { 'Content-Type':'application/json' };
+                          if (token) headers.Authorization = `Bearer ${token}`;
+                          const res = await fetch(`/api/availability/${a.id}`, { method:'PUT', headers, body: JSON.stringify({ date: editDate, start_time: editStart, end_time: editEnd, status: editStatus }) });
+                          if (!res.ok) { const t = await res.text(); throw new Error(t); }
+                          setEditingId(null);
+                          await refreshAvailRange();
+                          toast({ title:'Availability updated' });
+                        } catch(e:any) { toast({ variant:'destructive', title:'Update failed', description: e?.message||'Unknown error' }); }
+                        finally { setSavingAvail(false); }
+                      }}>Save</Button>
+                      <Button size="sm" variant="ghost" onClick={()=> setEditingId(null)}>Cancel</Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="font-medium">{a.date}</p>
+                      <p className="text-xs text-muted-foreground">{a.start_time || '--:--'} - {a.end_time || '--:--'}</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <Badge className="capitalize">{a.status}</Badge>
+                      <Button size="sm" variant="outline" onClick={()=>{ setEditingId(a.id); setEditDate(a.date); setEditStart(a.start_time||''); setEditEnd(a.end_time||''); setEditStatus(a.status); }}>Edit</Button>
+                      <Button size="sm" variant="destructive" onClick={async ()=>{
+                        if (!confirm('Delete this availability?')) return;
+                        try {
+                          const token = localStorage.getItem('auth_token')||undefined;
+                          const headers:any = token ? { Authorization: `Bearer ${token}` } : undefined;
+                          const res = await fetch(`/api/availability/${a.id}`, { method:'DELETE', headers });
+                          if (!res.ok) { const t = await res.text(); throw new Error(t); }
+                          await refreshAvailRange();
+                          toast({ title:'Availability deleted' });
+                        } catch(e:any) { toast({ variant:'destructive', title:'Delete failed', description: e?.message||'Unknown error' }); }
+                      }}>Delete</Button>
+                    </div>
+                  </div>
+                )}
               </div>
             ))}
             {avail.length===0 && <div className="text-sm text-muted-foreground">No availability set for the next two weeks.</div>}
