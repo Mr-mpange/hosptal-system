@@ -52,6 +52,7 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
       { icon: Calendar, label: "Appointments", path: "/appointments" },
       { icon: FileText, label: "Medical Records", path: "/records" },
       { icon: Bell, label: "Notifications", path: "/notifications" },
+      { icon: Settings, label: "Settings", path: "/settings" },
     ];
 
     // Role-specific additions
@@ -61,11 +62,9 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
     if (userRole === 'admin') {
       base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
       base.push({ icon: Users, label: "Users", path: "/users" });
-      base.push({ icon: Settings, label: "Settings", path: "/settings" });
     }
     if (userRole === 'manager') {
       base.splice(2, 0, { icon: Users, label: "Patients", path: "/patients" });
-      base.push({ icon: Settings, label: "Settings", path: "/settings" });
     }
     return base;
   };

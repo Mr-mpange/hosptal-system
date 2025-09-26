@@ -124,8 +124,19 @@ const Settings = () => {
   }, []);
 
   const canEdit = role === 'admin';
+  const canViewOrgSettings = role === 'admin' || role === 'manager';
+  const limitedMode = role === 'doctor' || role === 'patient';
 
   const load = async () => {
+    if (!canViewOrgSettings) {
+      // Use local defaults to render personal sections
+      setSettings({
+        application: { app_name: 'CareLink HMS', logo_url: '', primary_color: '#0ea5e9', secondary_color: '#334155', contact_email: '', contact_phone: '' },
+        billing: { enable_push_to_pay: false, default_mobile_provider: 'mpesa', default_bank_provider: 'crdb', allow_amount_override: false },
+        notifications: { role_scoped: true },
+      });
+      return;
+    }
     try {
       const res = await fetch('/api/settings', { headers: authHeaders });
       if (!res.ok) throw new Error(await res.text());
@@ -182,6 +193,19 @@ const Settings = () => {
     } finally { setSaving(false); }
   };
 
+  // Filter categories based on role (personalized for doctor/patient). Must be before any early return to preserve hooks order.
+  const visibleCategories = limitedMode
+    ? ([
+        { key: 'general', label: 'General', icon: LayoutGrid, items: [
+          { key: 'preferences', label: 'Preferences', icon: LayoutGrid },
+          { key: 'appearance', label: 'Appearance', icon: Palette },
+        ]},
+        { key: 'users', label: 'Users & Roles', icon: Users, items: [
+          { key: 'twofa', label: 'Two-Factor Auth (2FA)', icon: ShieldCheck },
+        ]},
+      ] as typeof categories)
+    : categories;
+
   if (!settings) return <div className="p-6 text-sm text-muted-foreground">Loading settings…</div>;
 
   const NavCategory = ({ c }: { c: typeof categories[number] }) => {
@@ -233,7 +257,9 @@ const Settings = () => {
           <h1 className="text-xl sm:text-2xl font-bold">Settings</h1>
         </div>
         <div>
-          <Button onClick={save} disabled={!canEdit || saving}>{saving ? 'Saving…' : 'Save Settings'}</Button>
+          {!limitedMode && (
+            <Button onClick={save} disabled={!canEdit || saving}>{saving ? 'Saving…' : 'Save Settings'}</Button>
+          )}
         </div>
       </div>
 
@@ -242,12 +268,23 @@ const Settings = () => {
         {/* Sidebar */}
         <aside className={`${sidebarCollapsed ? 'w-16' : 'w-72'} hidden md:block p-3 border-r bg-background transition-all duration-300 overflow-auto`}> 
           <div className="space-y-2">
-            {categories.map(c => <NavCategory key={c.key} c={c} />)}
+            {visibleCategories.map(c => <NavCategory key={c.key} c={c} />)}
           </div>
         </aside>
 
         {/* Content */}
         <section className="flex-1 p-4 overflow-auto">
+          {/* Role banners */}
+          {limitedMode && (
+            <div className="mb-4 p-3 rounded border bg-amber-50 text-amber-900 text-sm">
+              Personal view: You can manage your Preferences, Appearance, and Two-Factor Authentication. Organization settings are managed by Admin.
+            </div>
+          )}
+          {!limitedMode && !canEdit && (
+            <div className="mb-4 p-3 rounded border bg-blue-50 text-blue-900 text-sm">
+              Read-only: You can view organization settings. Only Admins can save changes.
+            </div>
+          )}
           {/* General: Preferences */}
           {activeItem === 'preferences' && (
             <Card className="mb-4">
