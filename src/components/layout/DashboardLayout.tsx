@@ -20,7 +20,7 @@ import { cn } from "@/lib/utils";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 
 interface DashboardLayoutProps {
-  userRole: "patient" | "doctor" | "admin" | "manager";
+  userRole: "patient" | "doctor" | "admin" | "manager" | "lab_tech";
   userName: string;
   userEmail: string;
   children: React.ReactNode;
@@ -37,7 +37,7 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
   const [composeOpen, setComposeOpen] = useState(false);
   const [composeTitle, setComposeTitle] = useState('');
   const [composeMessage, setComposeMessage] = useState('');
-  const [composeTarget, setComposeTarget] = useState<'doctor'|'manager'|'admin'>('doctor');
+  const [composeTarget, setComposeTarget] = useState<'doctor'|'manager'|'admin'|'lab_tech'>('doctor');
   const [composeBusy, setComposeBusy] = useState(false);
   const navigate = useNavigate();
 
@@ -50,6 +50,8 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
         ? '/dashboard/doctor'
         : userRole === 'manager'
         ? '/dashboard/manager'
+        : userRole === 'lab_tech'
+        ? '/dashboard/lab'
         : '/dashboard/admin';
 
     // Base items shown to all roles
@@ -100,9 +102,10 @@ const DashboardLayout = ({ userRole, userName, userEmail, children, onLogout, hi
   const allowedTargets = useMemo(() => {
     switch (userRole) {
       case 'patient': return ['doctor'] as const;
-      case 'doctor': return ['manager'] as const;
-      case 'manager': return ['admin','doctor'] as const;
-      case 'admin': return ['manager','doctor'] as const;
+      case 'doctor': return ['manager','lab_tech'] as const;
+      case 'manager': return ['admin','doctor','lab_tech'] as const;
+      case 'admin': return ['manager','doctor','lab_tech'] as const;
+      case 'lab_tech': return ['doctor','manager'] as const;
       default: return [] as const;
     }
   }, [userRole]);

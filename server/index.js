@@ -9,7 +9,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const envPath = path.resolve(__dirname, '../.env');
 dotenv.config({ path: envPath });
-
 // Core server imports and initialization must come BEFORE any route declarations
 import express from 'express';
 import cors from 'cors';
@@ -122,6 +121,35 @@ app.get('/api/payments', requireAuth, async (req, res) => {
   } catch (err) {
     console.error('/api/payments GET error:', err);
     res.status(500).json({ message: 'Fetch payments failed', details: toDbMessage(err) });
+  }
+});
+
+// Lab Orders: update result/flag/status by lab_tech (and admin/manager if needed)
+app.patch('/api/lab-orders/:id', requireAuth, requireRole('lab_tech','admin','manager'), async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ message: 'Invalid id' });
+    const row = await models.LabOrder.findByPk(id);
+    if (!row) return res.status(404).json({ message: 'Not found' });
+    const { result, results, value, unit, flag, status } = req.body || {};
+    const updates = {
+      result: result ?? results ?? row.result,
+      value: value ?? row.value,
+      unit: unit ?? row.unit,
+      flag: flag ?? row.flag,
+      status: status ?? row.status,
+    };
+    await row.update(updates);
+    // Notify doctor when critical or completed
+    try {
+      const message = flag ? `Lab result updated (flag: ${flag})` : 'Lab result updated';
+      const notif = await models.Notification.create({ title: 'Lab Result', message, target_role: 'doctor', created_by: Number(req.user?.sub)||null });
+      try { sseBroadcastNotification(notif); } catch {}
+    } catch {}
+    res.json(row);
+  } catch (err) {
+    console.error('/api/lab-orders/:id PATCH error:', err);
+    res.status(500).json({ message: 'Update lab order failed', details: toDbMessage(err) });
   }
 });
 
@@ -1039,9 +1067,9 @@ app.post('/api/notifications', requireAuth, async (req, res) => {
     // Allowed target policy
     const allowedMap = {
       patient: ['doctor'],
-      doctor: ['manager'],
-      manager: ['admin','doctor'],
-      admin: ['manager','doctor'],
+      doctor: ['manager','lab_tech'],
+      manager: ['admin','doctor','lab_tech'],
+      admin: ['manager','doctor','lab_tech'],
     };
     const allowed = allowedMap[sender] || [];
     if (!allowed.length) return res.status(403).json({ message: 'Your role cannot send notifications' });

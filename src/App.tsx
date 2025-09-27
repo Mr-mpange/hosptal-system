@@ -10,6 +10,7 @@ import PatientDashboard from "@/components/dashboard/PatientDashboard";
 import DoctorDashboard from "@/components/dashboard/DoctorDashboard";
 import AdminDashboard from "@/components/dashboard/AdminDashboard";
 import ManagerDashboard from "@/components/dashboard/ManagerDashboard";
+import LabTechDashboard from "@/components/dashboard/LabTechDashboard";
 import DashboardLayout from "@/components/layout/DashboardLayout";
 import Appointments from "./pages/Appointments";
 import Patients from "./pages/Patients";
@@ -21,7 +22,7 @@ import Notifications from "@/pages/Notifications";
 
 const queryClient = new QueryClient();
 
-type Role = "patient" | "doctor" | "admin" | "manager";
+type Role = "patient" | "doctor" | "admin" | "manager" | "lab_tech";
 
 const getAuthUser = (): { email: string; name: string; role: Role } | null => {
   try {
@@ -30,7 +31,7 @@ const getAuthUser = (): { email: string; name: string; role: Role } | null => {
     const parsed = JSON.parse(raw);
     if (parsed?.email && parsed?.role && parsed?.name) {
       const r = String(parsed.role).toLowerCase();
-      const role: Role = (r === "patient" || r === "doctor" || r === "admin" || r === "manager") ? (r as Role) : "patient";
+      const role: Role = (r === "patient" || r === "doctor" || r === "admin" || r === "manager" || r === "lab_tech") ? (r as Role) : "patient";
       return { email: parsed.email, name: parsed.name, role } as any;
     }
   } catch {}
@@ -65,6 +66,23 @@ const App = () => (
           <Route path="/*" element={<Index />} />
           <Route path="/register" element={<Register />} />
           {/* Role-specific dashboards (protected) */}
+          <Route
+            path="/dashboard/lab"
+            element={
+              <ProtectedRoute allowed={["lab_tech"]}>
+                {(() => {
+                  const u = getAuthUser();
+                  if (!u) return <Navigate to="/" replace />;
+                  const onLogout = () => { try { localStorage.removeItem("auth_user"); } catch {}; window.location.href = "/"; };
+                  return (
+                    <DashboardLayout userRole={u.role} userName={u.name} userEmail={u.email} onLogout={onLogout}>
+                      <LabTechDashboard />
+                    </DashboardLayout>
+                  );
+                })()}
+              </ProtectedRoute>
+            }
+          />
           <Route
             path="/dashboard/patient"
             element={
